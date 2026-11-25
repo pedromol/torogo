@@ -14,6 +14,19 @@ O `torogo` pode ser utilizado como uma **biblioteca em outros projetos Go** (ofe
   - `client.DialContext(ctx, "tcp", "host:port")` implementando `net.Dialer` e retornando `net.Conn`.
   - `client.HTTPClient()` retornando um `*http.Client` pronto para uso com tráfego 100% roteado via Tor.
   - `client.Transport()` expondo o `*http.Transport` subjacente para customizações.
+- **Suporte a Onion Services (.onion v3)**:
+  - Validação estrita de endereços `.onion` v3 (56 caracteres em Base32, checksum SHA3-256 e versão 0x03).
+  - Primitivas para handshake de Rendezvous e Link Specifiers conforme `rend-spec-v3.txt`.
+- **Controle de Fluxo SENDME**:
+  - Implementação completa das janelas de fluxo a nível de circuito (1000 células) e de stream (500 células) per `tor-spec.txt §7.3`.
+  - Emissão automática de `RELAY_SENDME` ao decrementar 100 células no circuito e 50 células no stream, permitindo transferências contínuas de grandes volumes de dados sem engasgos ou pausas pelos relays.
+- **Guards Persistentes em Disco**:
+  - Persistência automática do nó Guard primário em disco (`~/.torogo/guards.json`), mitigando ataques de correlação estatística e rastreamento a longo prazo.
+  - Reutilização inteligente com fallback e opções de customização (`WithGuardFile`, `WithDisableGuards`).
+- **Pluggable Transports & SOCKS5 Bridges**:
+  - Discador SOCKS5 RFC 1928 integrado em Go puro para rotear enlaces através de pontes de ofuscação (obfs4, Snowflake, meek).
+  - Parser de linhas `Bridge` padrão do Tor (`Bridge obfs4 IP:Port Fingerprint cert=... iat-mode=...`).
+  - Gerenciador de subprocessos compatível com a especificação Tor PT v2.1 IPC (`TOR_PT_MANAGED_TRANSPORT_VER=1`).
 - **Compatível com Distroless**: Pronto para ser empacotado em imagens mínimas e estáticas (`gcr.io/distroless/static-debian12`).
 - **Bootstrap de Diretório**:
   - Download do consenso de microdescritores das Directory Authorities oficiais.
@@ -137,8 +150,15 @@ torogo/
 │       ├── directory.go      # Cliente HTTP de diretório, fetch de microdescritores e seleção de caminho
 │       ├── directory_test.go # Testes de autoridades e utilitários de diretório
 │       ├── embedded_certs.go # Suporte a certificados de autoridade embutidos
+│       ├── flow_control_test.go # Testes de janelas e fluxo SENDME
+│       ├── guards.go         # Gerenciamento e persistência de Guards em disco
+│       ├── guards_test.go    # Testes de persistência e seleção de Guards
 │       ├── link.go           # Conexão de enlace TLS e handshake de link
 │       ├── ntor_test.go      # Testes do handshake ntor
+│       ├── onion.go          # Endereços Onion v3, checksum SHA3-256 e rendezvous
+│       ├── onion_test.go     # Testes de validação de endereços .onion
+│       ├── pt.go             # Pluggable Transports, discador SOCKS5 e bridges
+│       ├── pt_test.go        # Testes de pontes e cliente SOCKS5
 │       └── stream.go         # Abstração de stream multiplexada sobre o circuito (net.Conn)
 ├── docs/
 │   ├── ARCHITECTURE.md       # Documentação detalhada da arquitetura e protocolo interno

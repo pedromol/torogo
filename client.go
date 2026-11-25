@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 type Client struct {
 	mu        sync.RWMutex
 	consensus *tor.Consensus
+	guardMgr  *tor.GuardManager
 	opts      clientOptions
 	closed    bool
 }
@@ -26,6 +28,10 @@ type Client struct {
 type clientOptions struct {
 	circuitTimeout time.Duration
 	skipBootstrap  bool
+	guardPath      string
+	disableGuards  bool
+	bridgeConfig   *tor.BridgeConfig
+	bridgeDialer   tor.ContextDialer
 }
 
 // Option represents a configuration option for Client.
@@ -45,6 +51,42 @@ func WithLazyBootstrap() Option {
 	}
 }
 
+// WithGuardFile sets a custom file path for storing persistent guards.
+func WithGuardFile(filePath string) Option {
+	return func(o *clientOptions) {
+		o.guardPath = filePath
+	}
+}
+
+// WithDisableGuards disables persistent guard storage on disk.
+func WithDisableGuards() Option {
+	return func(o *clientOptions) {
+		o.disableGuards = true
+	}
+}
+
+// WithSocks5Proxy routes all Tor guard/bridge ORPort connections through a local SOCKS5 proxy
+// (e.g., from a Pluggable Transport like obfs4proxy or snowflake-client).
+func WithSocks5Proxy(proxyAddr string) Option {
+	return func(o *clientOptions) {
+		o.bridgeDialer = &tor.Socks5Dialer{ProxyAddr: proxyAddr}
+	}
+}
+
+// WithBridge parses a Tor Bridge line and configures Pluggable Transport routing.
+func WithBridge(bridgeLine string, proxyAddr string) Option {
+	return func(o *clientOptions) {
+		cfg, err := tor.ParseBridgeLine(bridgeLine)
+		if err == nil {
+			if proxyAddr != "" {
+				cfg.ProxyAddr = proxyAddr
+				o.bridgeDialer = &tor.Socks5Dialer{ProxyAddr: proxyAddr}
+			}
+			o.bridgeConfig = cfg
+		}
+	}
+}
+
 // NewClient creates and initializes a Tor client.
 // By default, it immediately bootstraps by downloading and validating the directory consensus.
 func NewClient(ctx context.Context, opts ...Option) (*Client, error) {
@@ -57,6 +99,13 @@ func NewClient(ctx context.Context, opts ...Option) (*Client, error) {
 
 	c := &Client{
 		opts: options,
+	}
+
+	if !options.disableGuards {
+		gm, err := tor.NewGuardManager(options.guardPath)
+		if err == nil {
+			c.guardMgr = gm
+		}
 	}
 
 	if !options.skipBootstrap {
@@ -118,12 +167,18 @@ func (c *Client) DialContext(ctx context.Context, network, addr string) (net.Con
 		return nil, fmt.Errorf("torogo: invalid port %q", portStr)
 	}
 
+	if strings.HasSuffix(strings.ToLower(host), ".onion") {
+		if _, err := tor.ParseOnionV3(host); err != nil {
+			return nil, fmt.Errorf("torogo: invalid .onion destination: %w", err)
+		}
+	}
+
 	cons, err := c.getConsensus(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	path, err := tor.SelectPathForPort(ctx, cons, port)
+	path, err := tor.SelectPathWithGuards(ctx, cons, port, c.guardMgr)
 	if err != nil {
 		return nil, fmt.Errorf("torogo: select path: %w", err)
 	}
@@ -139,7 +194,7 @@ func (c *Client) DialContext(ctx context.Context, network, addr string) (net.Con
 		defer cancel()
 	}
 
-	link, err := tor.DialLink(linkCtx, guard.IP.String(), int(guard.ORPort), edID)
+	link, err := tor.DialLinkWithDialer(linkCtx, c.opts.bridgeDialer, guard.IP.String(), int(guard.ORPort), edID)
 	if err != nil {
 		return nil, fmt.Errorf("torogo: dial guard: %w", err)
 	}

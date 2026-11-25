@@ -88,6 +88,26 @@ Este documento descreve detalhadamente o funcionamento interno do **Torogo**, um
 - Dados são trocados via células `RELAY_DATA` (máximo 498 bytes por célula).
 - Encerramento via `RELAY_END`.
 
+### 2.7. Controle de Fluxo SENDME (`circuit.go`, `stream.go`)
+- **Janela de Circuito:** Inicializada em 1000 células (`CircWindowInit`). A cada célula `RELAY_DATA` recebida, a janela decrementa. Ao atingir o limiar de 900 (`CircWindowThreshold`), o cliente envia uma célula `RELAY_SENDME` (streamID 0) para o endpoint do circuito e repõe 100 células na janela.
+- **Janela de Stream:** Inicializada em 500 células (`StreamWindowInit`). A cada célula `RELAY_DATA` recebida no stream, a janela decrementa. Ao atingir 450, o cliente emite `RELAY_SENDME` (com o streamID específico) e repõe 50 células.
+- **Pacotes de Envio (Packaging Window):** O cliente bloqueia ou aguarda confirmações `RELAY_SENDME` se a janela de envio atingir zero, respeitando estritamente `tor-spec.txt §7.3`.
+
+### 2.8. Guards Persistentes em Disco (`guards.go`)
+- O Torogo persiste nós Guard primários no arquivo `~/.torogo/guards.json` (ou caminho definido via `WithGuardFile`).
+- Mitiga ataques de correlação estatística através do reuso contínuo do mesmo nó Guard por até 60 dias.
+- Realiza rotação inteligente caso o nó fique offline (`fail_count >= 3`) ou deixe de ter a flag `Guard` no consenso.
+
+### 2.9. Onion Services v3 (.onion) (`onion.go`)
+- Suporte a endereços `.onion` v3 de 56 caracteres Base32 conforme `rend-spec-v3.txt`.
+- Validação estrita do checksum SHA3-256 e versão (`0x03`).
+- Cálculo do time-period de consenso (`86400s` com offset de `12h`) e estruturas para handshake de Rendezvous (`RELAY_ESTABLISH_RENDEZVOUS`, `RELAY_RENDEZVOUS_ESTABLISHED`, `RELAY_INTRODUCE1`).
+
+### 2.10. Pluggable Transports e Pontes SOCKS5 (`pt.go`)
+- **Discador SOCKS5 RFC 1928 Puro:** Permite tunelar o handshake de enlace TLS com o nó Guard/Bridge através de proxies locais.
+- **Parser de Linhas Bridge:** Decodifica linhas oficiais do Tor Project (`Bridge obfs4 IP:Port Fingerprint cert=... iat-mode=...`).
+- **Compatibilidade Tor PT v2.1:** Gerenciamento de subprocessos de transporte ofuscado (`TOR_PT_MANAGED_TRANSPORT_VER=1`) com leitura de anúncios `CMETHOD socks5`.
+
 ---
 
 ## 3. A Estrutura Pública `torogo.Client`

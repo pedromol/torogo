@@ -62,6 +62,37 @@ func TestClientDialErrors(t *testing.T) {
 	if _, err := c.DialContext(ctx, "tcp", "example.com:99999"); err == nil {
 		t.Error("expected error for port > 65535")
 	}
+
+	// Invalid .onion address
+	if _, err := c.DialContext(ctx, "tcp", "invalid-onion-name.onion:80"); err == nil {
+		t.Error("expected error for invalid .onion address")
+	}
+}
+
+func TestClientBridgeAndGuardOptions(t *testing.T) {
+	ctx := context.Background()
+	bridgeLine := "Bridge obfs4 192.0.2.1:443 7F25776C684351BD7C8F2241D3B6CCDAE5D285EC cert=abc iat-mode=0"
+
+	c, err := NewClient(ctx,
+		WithLazyBootstrap(),
+		WithDisableGuards(),
+		WithSocks5Proxy("127.0.0.1:9050"),
+		WithBridge(bridgeLine, "127.0.0.1:9050"),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error creating client with bridge options: %v", err)
+	}
+	defer c.Close()
+
+	if !c.opts.disableGuards {
+		t.Errorf("expected disableGuards to be true")
+	}
+	if c.opts.bridgeConfig == nil || c.opts.bridgeConfig.Transport != "obfs4" {
+		t.Errorf("expected bridgeConfig with transport obfs4")
+	}
+	if c.opts.bridgeDialer == nil {
+		t.Errorf("expected non-nil bridgeDialer")
+	}
 }
 
 func TestClientClosed(t *testing.T) {
