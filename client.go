@@ -227,6 +227,59 @@ func (c *Client) DialContext(ctx context.Context, network, addr string) (net.Con
 	}, nil
 }
 
+// Resolve performs remote DNS resolution over a 3-hop Tor circuit (per tor-spec.txt §6.4),
+// returning resolved IP addresses without opening a TCP connection and with zero local DNS leak.
+func (c *Client) Resolve(ctx context.Context, host string) ([]net.IP, error) {
+	c.mu.RLock()
+	if c.closed {
+		c.mu.RUnlock()
+		return nil, errors.New("torogo: client is closed")
+	}
+	c.mu.RUnlock()
+
+	cons, err := c.getConsensus(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	path, err := tor.SelectPathWithGuards(ctx, cons, 80, c.guardMgr)
+	if err != nil {
+		return nil, fmt.Errorf("torogo: select path: %w", err)
+	}
+
+	guard := path.Routers[0]
+	var edID [32]byte
+	copy(edID[:], path.Microdescs[0].Ed25519ID)
+
+	linkCtx := ctx
+	if c.opts.circuitTimeout > 0 {
+		var cancel context.CancelFunc
+		linkCtx, cancel = context.WithTimeout(ctx, c.opts.circuitTimeout)
+		defer cancel()
+	}
+
+	link, err := tor.DialLinkWithDialer(linkCtx, c.opts.bridgeDialer, guard.IP.String(), int(guard.ORPort), edID)
+	if err != nil {
+		return nil, fmt.Errorf("torogo: dial guard: %w", err)
+	}
+
+	circ, err := tor.NewCircuit(link, guard, path.Microdescs[0])
+	if err != nil {
+		link.Close()
+		return nil, fmt.Errorf("torogo: create circuit: %w", err)
+	}
+	defer circ.Close()
+
+	if err := circ.Extend(path.Routers[1], path.Microdescs[1]); err != nil {
+		return nil, fmt.Errorf("torogo: extend to middle: %w", err)
+	}
+	if err := circ.Extend(path.Routers[2], path.Microdescs[2]); err != nil {
+		return nil, fmt.Errorf("torogo: extend to exit: %w", err)
+	}
+
+	return circ.Resolve(host)
+}
+
 // Dial establishes a connection using the background context.
 func (c *Client) Dial(network, addr string) (net.Conn, error) {
 	return c.DialContext(context.Background(), network, addr)

@@ -108,6 +108,18 @@ Este documento descreve detalhadamente o funcionamento interno do **Torogo**, um
 - **Parser de Linhas Bridge:** Decodifica linhas oficiais do Tor Project (`Bridge obfs4 IP:Port Fingerprint cert=... iat-mode=...`).
 - **Compatibilidade Tor PT v2.1:** Gerenciamento de subprocessos de transporte ofuscado (`TOR_PT_MANAGED_TRANSPORT_VER=1`) com leitura de anúncios `CMETHOD socks5`.
 
+### 2.11. Resolução Remota de DNS e Prevenção de DNS Leak (`circuit.go`, `client.go`)
+- **Zero DNS Leak:** Em conexões `DialContext`, o nome de domínio nunca é resolvido pela máquina local ou ISP. A string de domínio é enviada diretamente dentro da célula cifrada `RELAY_BEGIN` para o Exit Node remoto, que efetua a consulta.
+- **`Resolve` Remoto (`RELAY_RESOLVE` / `RELAY_RESOLVED`):** Permite resolver nomes de host remotamente através do circuito de 3 saltos sem abrir uma conexão TCP, de forma idêntica ao utilitário `tor-resolve` do cliente oficial C.
+
+### 2.12. Servidor SOCKS5 Local Drop-in (`socks_server.go`)
+- Implementa um servidor SOCKS5 RFC 1928 completo via `client.ListenSOCKS5(addr)`.
+- Permite que qualquer aplicativo do sistema operacional (cURL, Firefox, navegadores, Telegram, bots) aponte para `127.0.0.1:9050` e utilize o Torogo como substituto drop-in para o binário do Tor em C.
+
+### 2.13. Seleção de Caminho Ponderada e Exclusão de Famílias (`path-spec.txt`)
+- Extrai `bandwidth-weights` e larguras de banda individuais do consenso para realizar seleção balanceada ponderada por capacidade real de rede (`Wgg`, `Wgd`, `Wmg`, `Wmm`, `Wee`, `Wed`).
+- Validação estrita de famílias de nós (`sameFamily`), garantindo que nós pertencentes à mesma família declarada ou mesma sub-rede `/16` nunca compartilhem o mesmo circuito.
+
 ---
 
 ## 3. A Estrutura Pública `torogo.Client`

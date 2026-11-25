@@ -128,6 +128,55 @@ func main() {
 }
 ```
 
+### Exemplo 3: Servidor SOCKS5 Local (Drop-in para o binário `tor`)
+
+Qualquer aplicação externa (cURL, Firefox, Telegram, Git, scripts Python) pode se conectar através do Torogo sem precisar do binário C `tor` instalado:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/pedromol/torogo"
+)
+
+func main() {
+	client, err := torogo.NewClient(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.Close()
+
+	// Inicia um servidor proxy SOCKS5 local na porta 9050 padrão do Tor
+	srv, err := client.ListenSOCKS5("127.0.0.1:9050")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer srv.Close()
+
+	fmt.Println("SOCKS5 proxy rodando em", srv.Addr())
+	select {} // bloqueia mantendo o daemon ativo
+}
+```
+
+E no terminal:
+```bash
+curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip
+```
+
+### Exemplo 4: Resolução de DNS Remota via Tor (Zero DNS Leak)
+
+```go
+ips, err := client.Resolve(ctx, "duckduckgo.com")
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println("IPs resolvidos remotamente pelo Exit Node:", ips)
+```
+
 ---
 
 ## Estrutura do Projeto
