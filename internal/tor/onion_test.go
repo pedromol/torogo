@@ -1,6 +1,7 @@
 package tor
 
 import (
+	"crypto/ecdh"
 	"crypto/rand"
 	"testing"
 	"time"
@@ -91,5 +92,84 @@ func TestRendezvousCookie(t *testing.T) {
 	}
 	if c1 == c2 {
 		t.Fatalf("cookies should be unique")
+	}
+}
+
+func TestDeriveBlindedKeyAndSubcredential(t *testing.T) {
+	var pubkey [32]byte
+	copy(pubkey[:], []byte("01234567890123456789012345678901"))
+
+	blinded := DeriveBlindedKey(pubkey, 12345)
+	if blinded == pubkey {
+		t.Fatalf("blinded key must differ from public key")
+	}
+
+	subcred := DeriveSubcredential(pubkey, blinded)
+	if subcred == [32]byte{} {
+		t.Fatalf("subcred should not be empty")
+	}
+
+	// Invariant: same inputs produce same outputs
+	blinded2 := DeriveBlindedKey(pubkey, 12345)
+	if blinded != blinded2 {
+		t.Fatalf("derivation should be deterministic")
+	}
+}
+
+func TestHSDirRingAndSelection(t *testing.T) {
+	var id1, id2, id3 [20]byte
+	copy(id1[:], []byte("hsdir111111111111111"))
+	copy(id2[:], []byte("hsdir222222222222222"))
+	copy(id3[:], []byte("hsdir333333333333333"))
+
+	cons := &Consensus{
+		Routers: []*RouterStatus{
+			{Nickname: "HSDir1", Identity: id1, Flags: map[string]bool{"HSDir": true, "Running": true, "Valid": true}},
+			{Nickname: "HSDir2", Identity: id2, Flags: map[string]bool{"HSDir": true, "Running": true, "Valid": true}},
+			{Nickname: "HSDir3", Identity: id3, Flags: map[string]bool{"HSDir": true, "Running": true, "Valid": true}},
+		},
+	}
+
+	var descID [32]byte
+	copy(descID[:], []byte("target-desc-id-0123456789abcdef"))
+
+	responsible := FindResponsibleHSDirs(cons, descID, 1000, 3)
+	if len(responsible) != 3 {
+		t.Fatalf("expected 3 responsible HSDir nodes, got %d", len(responsible))
+	}
+}
+
+func TestBuildIntroduce1Payload(t *testing.T) {
+	cookie := [20]byte{1, 2, 3, 4, 5}
+	rpSpec := BuildLinkSpecifierIPv4([4]byte{192, 0, 2, 1}, 9001)
+	clientEph := [32]byte{9, 9, 9}
+
+	payload := BuildIntroduce1Payload(cookie, [][]byte{rpSpec}, clientEph)
+	if len(payload) != 20+1+len(rpSpec)+32 {
+		t.Fatalf("unexpected payload length: %d", len(payload))
+	}
+}
+
+func TestDeriveHSNtorKeys(t *testing.T) {
+	clientPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdh generate failed: %v", err)
+	}
+	serverPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdh generate server failed: %v", err)
+	}
+
+	var servicePub [32]byte
+	var subcred [32]byte
+	copy(servicePub[:], []byte("service-pubkey-0123456789abcdef"))
+	copy(subcred[:], []byte("subcredential-0123456789abcdef0"))
+
+	keys, err := DeriveHSNtorKeys(clientPriv, serverPriv.PublicKey().Bytes(), servicePub, subcred)
+	if err != nil {
+		t.Fatalf("DeriveHSNtorKeys failed: %v", err)
+	}
+	if len(keys.Df) != 20 || len(keys.Db) != 20 || len(keys.Kf) != 16 || len(keys.Kb) != 16 {
+		t.Fatalf("unexpected key material lengths: %+v", keys)
 	}
 }
