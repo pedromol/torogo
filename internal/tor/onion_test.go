@@ -1,8 +1,12 @@
 package tor
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdh"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"testing"
 	"time"
 )
@@ -171,5 +175,46 @@ func TestDeriveHSNtorKeys(t *testing.T) {
 	}
 	if len(keys.Df) != 20 || len(keys.Db) != 20 || len(keys.Kf) != 16 || len(keys.Kb) != 16 {
 		t.Fatalf("unexpected key material lengths: %+v", keys)
+	}
+}
+
+func TestDescriptorLayerEncryptionAndDecryption(t *testing.T) {
+	var subcred [32]byte
+	copy(subcred[:], []byte("subcredential-test-123456789012"))
+
+	plaintext := []byte("introduction-point test-ip-1\nenc-key ntor AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n")
+	salt := []byte("1234567890123456")
+
+	// Derive keys
+	keyMaterial := hkdfSHA256(subcred[:], salt, []byte("hsdir-encrypted-data"), 64)
+	encKey := keyMaterial[:32]
+	macKey := keyMaterial[32:64]
+
+	// Encrypt plaintext
+	block, err := aes.NewCipher(encKey)
+	if err != nil {
+		t.Fatalf("aes cipher failed: %v", err)
+	}
+	ciphertext := make([]byte, len(plaintext))
+	stream := cipher.NewCTR(block, make([]byte, aes.BlockSize))
+	stream.XORKeyStream(ciphertext, plaintext)
+
+	// Compute MAC
+	macHasher := hmac.New(sha256.New, macKey)
+	macHasher.Write(salt)
+	macHasher.Write(ciphertext)
+	mac := macHasher.Sum(nil)
+
+	// Package layer: salt (16) || ciphertext || MAC (32)
+	layer := append([]byte(nil), salt...)
+	layer = append(layer, ciphertext...)
+	layer = append(layer, mac...)
+
+	decrypted, err := DecryptDescriptorLayer(layer, subcred, "hsdir-encrypted-data")
+	if err != nil {
+		t.Fatalf("DecryptDescriptorLayer failed: %v", err)
+	}
+	if string(decrypted) != string(plaintext) {
+		t.Fatalf("expected decrypted plaintext %q, got %q", string(plaintext), string(decrypted))
 	}
 }

@@ -65,6 +65,47 @@ func (c *Circuit) OpenStream(host string, port int) (*Stream, error) {
 	}
 }
 
+// OpenDirStream opens a directory stream (RELAY_BEGIN_DIR) to the exit hop of the circuit.
+func (c *Circuit) OpenDirStream() (*Stream, error) {
+	if c == nil || len(c.hops) == 0 {
+		return nil, fmt.Errorf("tor: circuit has no hops")
+	}
+	id := randomStreamID()
+	exit := len(c.hops) - 1
+	if err := c.sendRelayCell(exit, CmdRelay, RelayBeginDir, id, nil); err != nil {
+		return nil, err
+	}
+	s := &Stream{
+		circuit:       c,
+		id:            id,
+		packageWindow: StreamWindowInit,
+		deliverWindow: StreamWindowInit,
+	}
+	for {
+		hop, cmd, sid, data, err := c.recvRelayCell()
+		if err != nil {
+			return nil, err
+		}
+		if hop != exit || sid != id {
+			continue
+		}
+		switch cmd {
+		case RelayConnected:
+			return s, nil
+		case RelayEnd:
+			s.closed = true
+			return nil, endReasonError(data)
+		case RelayData:
+			s.deliverWindow--
+			if s.deliverWindow <= StreamWindowThreshold {
+				_ = c.sendRelayCell(exit, CmdRelay, RelaySendme, s.id, nil)
+				s.deliverWindow += StreamWindowIncrement
+			}
+			s.pending = append(s.pending, data...)
+		}
+	}
+}
+
 func (s *Stream) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil

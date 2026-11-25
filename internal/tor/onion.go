@@ -2,12 +2,19 @@ package tor
 
 import (
 	"bytes"
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdh"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/sha3"
 	"encoding/base32"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -295,4 +302,164 @@ func DeriveHSNtorKeys(clientPriv *ecdh.PrivateKey, serverPubBytes []byte, servic
 		Kf: keyMaterial[40:56],
 		Kb: keyMaterial[56:72],
 	}, nil
+}
+
+// DecryptedDescriptor holds the decrypted contents of an Onion Service v3 descriptor.
+type DecryptedDescriptor struct {
+	RevisionCounter uint64
+	LifetimeMinutes uint32
+	IntroPoints     []IntroPoint
+}
+
+// FetchDescriptor fetches an onion service descriptor from an HSDir relay via a directory stream.
+func FetchDescriptor(ctx context.Context, circ *Circuit, descID [32]byte) ([]byte, error) {
+	if circ == nil {
+		return nil, fmt.Errorf("tor: nil circuit for FetchDescriptor")
+	}
+	descB32 := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(descID[:]))
+	stream, err := circ.OpenDirStream()
+	if err != nil {
+		return nil, fmt.Errorf("tor: open dir stream to hsdir failed: %w", err)
+	}
+	defer stream.Close()
+
+	req := fmt.Sprintf("GET /tor/hs/3/%s HTTP/1.0\r\n\r\n", descB32)
+	if _, err := stream.Write([]byte(req)); err != nil {
+		return nil, fmt.Errorf("tor: failed to write hsdir request: %w", err)
+	}
+
+	raw, err := io.ReadAll(stream)
+	if err != nil {
+		return nil, fmt.Errorf("tor: failed to read hsdir response: %w", err)
+	}
+
+	headerEnd := bytes.Index(raw, []byte("\r\n\r\n"))
+	if headerEnd != -1 {
+		raw = raw[headerEnd+4:]
+	}
+	return raw, nil
+}
+
+// DecryptDescriptorLayer decrypts an encrypted descriptor layer (superencrypted or encrypted) per rend-spec-v3.txt §2.5.
+func DecryptDescriptorLayer(encryptedBlock []byte, subcred [32]byte, stringInfo string) ([]byte, error) {
+	if len(encryptedBlock) < 48 {
+		return nil, fmt.Errorf("tor: encrypted layer too short (%d bytes)", len(encryptedBlock))
+	}
+
+	salt := encryptedBlock[:16]
+	ciphertext := encryptedBlock[16 : len(encryptedBlock)-32]
+	expectedMAC := encryptedBlock[len(encryptedBlock)-32:]
+
+	keyMaterial := hkdfSHA256(subcred[:], salt, []byte(stringInfo), 64)
+	encKey := keyMaterial[:32]
+	macKey := keyMaterial[32:64]
+
+	macHasher := hmac.New(sha256.New, macKey)
+	macHasher.Write(salt)
+	macHasher.Write(ciphertext)
+	actualMAC := macHasher.Sum(nil)
+
+	if !hmac.Equal(expectedMAC, actualMAC) {
+		return nil, fmt.Errorf("tor: descriptor layer MAC mismatch")
+	}
+
+	block, err := aes.NewCipher(encKey)
+	if err != nil {
+		return nil, err
+	}
+	plaintext := make([]byte, len(ciphertext))
+	stream := cipher.NewCTR(block, make([]byte, aes.BlockSize))
+	stream.XORKeyStream(plaintext, ciphertext)
+
+	return plaintext, nil
+}
+
+// ParseDescriptor parses and decrypts a raw Tor v3 Onion Service descriptor per rend-spec-v3.txt §2.4.
+func ParseDescriptor(raw []byte, subcred [32]byte) (*DecryptedDescriptor, error) {
+	rawStr := string(raw)
+	outerB64 := extractPEMOrMessage(rawStr, "superencrypted")
+	if outerB64 == "" {
+		return nil, fmt.Errorf("tor: descriptor missing superencrypted block")
+	}
+
+	outerBytes, err := base64.StdEncoding.DecodeString(outerB64)
+	if err != nil {
+		return nil, fmt.Errorf("tor: invalid base64 in superencrypted block: %w", err)
+	}
+
+	decryptedOuter, err := DecryptDescriptorLayer(outerBytes, subcred, "hsdir-superencrypted-data")
+	if err != nil {
+		return nil, fmt.Errorf("tor: failed to decrypt outer descriptor layer: %w", err)
+	}
+
+	innerB64 := extractPEMOrMessage(string(decryptedOuter), "encrypted")
+	if innerB64 == "" {
+		return nil, fmt.Errorf("tor: outer layer missing encrypted block")
+	}
+
+	innerBytes, err := base64.StdEncoding.DecodeString(innerB64)
+	if err != nil {
+		return nil, fmt.Errorf("tor: invalid base64 in inner encrypted block: %w", err)
+	}
+
+	decryptedInner, err := DecryptDescriptorLayer(innerBytes, subcred, "hsdir-encrypted-data")
+	if err != nil {
+		return nil, fmt.Errorf("tor: failed to decrypt inner descriptor layer: %w", err)
+	}
+
+	return parseInnerDescriptor(decryptedInner)
+}
+
+func extractPEMOrMessage(doc, marker string) string {
+	idx := strings.Index(doc, marker)
+	if idx == -1 {
+		idx = 0
+	}
+	startTag := "-----BEGIN MESSAGE-----"
+	endTag := "-----END MESSAGE-----"
+	start := strings.Index(doc[idx:], startTag)
+	if start == -1 {
+		return ""
+	}
+	start += idx + len(startTag)
+	end := strings.Index(doc[start:], endTag)
+	if end == -1 {
+		return ""
+	}
+	content := doc[start : start+end]
+	return strings.Join(strings.Fields(content), "")
+}
+
+func parseInnerDescriptor(data []byte) (*DecryptedDescriptor, error) {
+	desc := &DecryptedDescriptor{}
+	lines := strings.Split(string(data), "\n")
+	var currentIP *IntroPoint
+
+	for _, l := range lines {
+		line := strings.TrimSpace(l)
+		if strings.HasPrefix(line, "introduction-point ") {
+			if currentIP != nil {
+				desc.IntroPoints = append(desc.IntroPoints, *currentIP)
+			}
+			currentIP = &IntroPoint{}
+		} else if strings.HasPrefix(line, "onion-key ntor ") {
+			if currentIP != nil {
+				k, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(line, "onion-key ntor "))
+				if err == nil && len(k) == 32 {
+					copy(currentIP.EncKey[:], k)
+				}
+			}
+		} else if strings.HasPrefix(line, "enc-key ntor ") {
+			if currentIP != nil {
+				k, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(line, "enc-key ntor "))
+				if err == nil && len(k) == 32 {
+					copy(currentIP.EncKey[:], k)
+				}
+			}
+		}
+	}
+	if currentIP != nil {
+		desc.IntroPoints = append(desc.IntroPoints, *currentIP)
+	}
+	return desc, nil
 }
