@@ -111,29 +111,26 @@ func (s *Stream) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 
-	s.mu.Lock()
-	if len(s.pending) > 0 {
-		n := copy(p, s.pending)
-		s.pending = s.pending[n:]
-		s.mu.Unlock()
-		return n, nil
-	}
-	if s.closed {
-		s.mu.Unlock()
-		return 0, io.EOF
-	}
-	s.mu.Unlock()
-
 	exit := len(s.circuit.hops) - 1
 	for {
+		s.mu.Lock()
+		if len(s.pending) > 0 {
+			n := copy(p, s.pending)
+			s.pending = s.pending[n:]
+			s.mu.Unlock()
+			return n, nil
+		}
+		if s.closed {
+			s.mu.Unlock()
+			return 0, io.EOF
+		}
+		s.mu.Unlock()
+
 		hop, cmd, sid, data, err := s.circuit.recvRelayCell()
 		if err != nil {
 			return 0, err
 		}
-		if hop != exit {
-			continue
-		}
-		if sid != s.id {
+		if hop != exit || sid != s.id {
 			continue
 		}
 		s.mu.Lock()
@@ -189,10 +186,10 @@ func (s *Stream) Write(p []byte) (int, error) {
 			if err != nil {
 				return total, err
 			}
+			s.mu.Lock()
 			if hop != exit || sid != s.id {
 				continue
 			}
-			s.mu.Lock()
 			switch cmd {
 			case RelaySendme:
 				s.packageWindow += StreamWindowIncrement

@@ -13,7 +13,7 @@ import (
 )
 
 type Link struct {
-	conn    *tls.Conn
+	conn    net.Conn
 	version int
 }
 
