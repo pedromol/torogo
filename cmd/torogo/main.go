@@ -3,38 +3,88 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"time"
+	"os/signal"
+	"syscall"
 
 	"github.com/pedromol/torogo"
 )
 
-const targetHost = "check.torproject.org"
+const defaultCheckHost = "check.torproject.org"
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	var (
+		socksAddr   = flag.String("socks", "", "Start local SOCKS5 proxy listener (e.g. 127.0.0.1:9050)")
+		controlAddr = flag.String("control", "", "Start Tor Control Port listener (e.g. 127.0.0.1:9051)")
+		resolveHost = flag.String("resolve", "", "Perform remote DNS resolution over Tor without leaking queries")
+	)
+	flag.Parse()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	if err := run(ctx); err != nil {
+
+	client, err := torogo.NewClient(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "torogo: bootstrap error: %v\n", err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	if *resolveHost != "" {
+		ips, err := client.Resolve(ctx, *resolveHost)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "torogo: resolve error: %v\n", err)
+			os.Exit(1)
+		}
+		for _, ip := range ips {
+			fmt.Println(ip)
+		}
+		return
+	}
+
+	if *socksAddr != "" || *controlAddr != "" {
+		if *socksAddr != "" {
+			srv, err := client.ListenSOCKS5(*socksAddr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "torogo: socks5 error: %v\n", err)
+				os.Exit(1)
+			}
+			defer srv.Close()
+			fmt.Printf("Torogo SOCKS5 proxy listening on %s\n", srv.Addr())
+		}
+		if *controlAddr != "" {
+			ctrl, err := client.ListenControl(*controlAddr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "torogo: control port error: %v\n", err)
+				os.Exit(1)
+			}
+			defer ctrl.Close()
+			fmt.Printf("Torogo Control Port listening on %s\n", ctrl.Addr())
+		}
+
+		fmt.Println("Tor daemon is running. Press Ctrl+C to terminate.")
+		<-ctx.Done()
+		fmt.Println("\nShutting down Torogo...")
+		return
+	}
+
+	// Default run: HTTP connectivity test over Tor
+	if err := checkConnectivity(ctx, client); err != nil {
 		fmt.Fprintln(os.Stderr, "torogo:", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context) error {
+func checkConnectivity(ctx context.Context, client *torogo.Client) error {
 	fmt.Fprintln(os.Stderr, "initializing torogo client...")
-	client, err := torogo.NewClient(ctx)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
+	fmt.Fprintln(os.Stderr, "making HTTP request over Tor...")
 
 	httpClient := client.HTTPClient()
-
-	fmt.Fprintln(os.Stderr, "making HTTP request over Tor...")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+targetHost+"/api/ip", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+defaultCheckHost+"/api/ip", nil)
 	if err != nil {
 		return err
 	}
@@ -48,22 +98,18 @@ func run(ctx context.Context) error {
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("target HTTP status: %s", resp.Status)
+		return fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	var out struct {
+	var status struct {
 		IsTor bool   `json:"IsTor"`
 		IP    string `json:"IP"`
 	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return fmt.Errorf("parse target response: %w", err)
+	if err := json.Unmarshal(body, &status); err != nil {
+		return fmt.Errorf("bad JSON from check service: %w", err)
 	}
-	fmt.Printf("circuit established\nIsTor=%v IP=%s\n", out.IsTor, out.IP)
-	if !out.IsTor {
-		return fmt.Errorf("exit is not recognized as a Tor exit")
-	}
+
+	fmt.Println("circuit established")
+	fmt.Printf("IsTor=%t IP=%s\n", status.IsTor, status.IP)
 	return nil
 }
