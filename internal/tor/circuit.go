@@ -267,7 +267,12 @@ func (c *Circuit) recvRelayCell() (int, byte, uint16, []byte, error) {
 				if cmd == RelayData {
 					c.deliverWindow--
 					if c.deliverWindow <= CircWindowThreshold {
-						_ = c.sendRelayCell(i, CmdRelay, RelaySendme, 0, nil)
+						// Proposal 289: Authenticated SENDME version 1 with 20-byte rolling digest
+						sendmePayload := make([]byte, 1+2+20)
+						sendmePayload[0] = 0x01
+						binary.BigEndian.PutUint16(sendmePayload[1:3], 20)
+						copy(sendmePayload[3:], sum)
+						_ = c.sendRelayCell(i, CmdRelay, RelaySendme, 0, sendmePayload)
 						c.deliverWindow += CircWindowIncrement
 					}
 				} else if cmd == RelaySendme && sid == 0 {

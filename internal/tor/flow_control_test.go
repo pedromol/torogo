@@ -1,9 +1,11 @@
 package tor
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha1"
+	"encoding/binary"
 	"net"
 	"testing"
 )
@@ -135,5 +137,109 @@ func TestStreamWrite_WaitSendmeWithOtherStreamCells(t *testing.T) {
 	}
 	if n != 9 {
 		t.Fatalf("expected 9 bytes written, got %d", n)
+	}
+}
+
+func TestCircuitDeliverWindow_AuthenticatedSendme(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	keys := &HopKeys{
+		Df: make([]byte, 20),
+		Db: make([]byte, 20),
+		Kf: make([]byte, 16),
+		Kb: make([]byte, 16),
+	}
+	hop, err := newHop(&RouterStatus{}, &Microdesc{}, keys)
+	if err != nil {
+		t.Fatalf("newHop: %v", err)
+	}
+
+	link := &Link{conn: c1}
+	circ := &Circuit{
+		link:          link,
+		circID:        1,
+		hops:          []*Hop{hop},
+		packageWindow: CircWindowInit,
+		deliverWindow: CircWindowThreshold + 1, // 1 cell away from triggering SENDME
+	}
+
+	bwdBlock, err := aes.NewCipher(keys.Kb)
+	if err != nil {
+		t.Fatalf("aes: %v", err)
+	}
+	peerEnc := cipher.NewCTR(bwdBlock, make([]byte, aes.BlockSize))
+	peerDigest := sha1.New()
+	peerDigest.Write(keys.Db)
+
+	// Send a RelayData cell from peer
+	body, err := makeRelayBody(RelayData, 1, []byte("data payload"))
+	if err != nil {
+		t.Fatalf("makeRelayBody: %v", err)
+	}
+	peerDigest.Write(body)
+	expectedSum := peerDigest.Sum(nil)
+	copy(body[5:9], expectedSum[:4])
+	peerEnc.XORKeyStream(body, body)
+
+	go func() {
+		_ = writeCell(c2, 1, CmdRelay, body)
+	}()
+
+	// Circuit receives relay cell; deliverWindow drops to CircWindowThreshold
+	var sendmeCell *Cell
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sendmeCell, _ = readCell(c2)
+	}()
+
+	hopIdx, cmd, sid, _, err := circ.recvRelayCell()
+	if err != nil {
+		t.Fatalf("recvRelayCell: %v", err)
+	}
+	if hopIdx != 0 || cmd != RelayData || sid != 1 {
+		t.Fatalf("unexpected recvRelayCell result: hop=%d, cmd=%d, sid=%d", hopIdx, cmd, sid)
+	}
+
+	<-done
+	if sendmeCell == nil {
+		t.Fatal("expected circuit SENDME cell sent to peer")
+	}
+	if sendmeCell.CircID != 1 || sendmeCell.Command != CmdRelay {
+		t.Fatalf("unexpected cell circID=%d, command=%d", sendmeCell.CircID, sendmeCell.Command)
+	}
+
+	// Decrypt outgoing SENDME cell
+	fwdBlock, err := aes.NewCipher(keys.Kf)
+	if err != nil {
+		t.Fatalf("aes: %v", err)
+	}
+	peerDec := cipher.NewCTR(fwdBlock, make([]byte, aes.BlockSize))
+	sendmeBody := sendmeCell.Body
+	peerDec.XORKeyStream(sendmeBody, sendmeBody)
+
+	if sendmeBody[0] != RelaySendme {
+		t.Fatalf("expected RelaySendme, got %d", sendmeBody[0])
+	}
+	sendmeStreamID := binary.BigEndian.Uint16(sendmeBody[3:5])
+	if sendmeStreamID != 0 {
+		t.Fatalf("expected circuit SENDME streamID 0, got %d", sendmeStreamID)
+	}
+	dataLen := int(binary.BigEndian.Uint16(sendmeBody[9:11]))
+	if dataLen != 23 {
+		t.Fatalf("expected authenticated SENDME payload length 23, got %d", dataLen)
+	}
+	payload := sendmeBody[11 : 11+dataLen]
+	if payload[0] != 0x01 {
+		t.Fatalf("expected SENDME version 0x01, got 0x%02x", payload[0])
+	}
+	digestLen := binary.BigEndian.Uint16(payload[1:3])
+	if digestLen != 20 {
+		t.Fatalf("expected digest length 20, got %d", digestLen)
+	}
+	if !bytes.Equal(payload[3:23], expectedSum) {
+		t.Fatalf("authenticated SENDME digest mismatch: got %x, want %x", payload[3:23], expectedSum)
 	}
 }
