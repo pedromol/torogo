@@ -23,9 +23,16 @@ type certEntry struct {
 }
 
 func DialLink(ctx context.Context, ip string, orPort int, edID [32]byte) (*Link, error) {
+	d := &net.Dialer{Timeout: 10 * time.Second}
+	return DialLinkWithDialer(ctx, d, ip, orPort, edID)
+}
+
+func DialLinkWithDialer(ctx context.Context, dialer ContextDialer, ip string, orPort int, edID [32]byte) (*Link, error) {
+	if dialer == nil {
+		dialer = &net.Dialer{Timeout: 10 * time.Second}
+	}
 	addr := net.JoinHostPort(ip, strconv.Itoa(orPort))
-	d := net.Dialer{Timeout: 10 * time.Second}
-	raw, err := d.DialContext(ctx, "tcp", addr)
+	raw, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}
