@@ -1,63 +1,58 @@
 # Torogo: Pure Go Tor Client & Library
 
-Cliente e biblioteca Tor minimalista implementado **100% em Go puro**, utilizando exclusivamente a biblioteca padrão (`crypto/*`, `net/*`, `encoding/*`, `compress/zlib`). Não possui dependências de terceiros no `go.mod`, não utiliza CGO e não depende do binário do sistema `tor`.
+Minimalist, full-featured Tor network client and library implemented **100% in pure Go**, using exclusively the Go standard library (`crypto/*`, `net/*`, `encoding/*`, `compress/zlib`, `io`, `time`). No external dependencies in `go.mod`, zero CGO, and no dependency on the system `tor` binary.
 
-O `torogo` pode ser utilizado como uma **biblioteca em outros projetos Go** (oferecendo abstrações padrão como `net.Dialer` e `*http.Client`) ou executado diretamente como **aplicação/CLI**.
+**Torogo** can be imported as a **reusable Go library** (providing standard abstractions like `net.Dialer` and `*http.Client`) or run directly as a **standalone daemon / CLI**, serving as a drop-in replacement for the official C `tor` binary.
 
 ---
 
-## Características
+## Key Features
 
-- **100% Go Standard Library**: Zero dependências externas no `go.mod` / `go.sum`, compila com `CGO_ENABLED=0`.
-- **API Idiomática para Bibliotecas**:
-  - `torogo.NewClient(ctx, opts...)` para inicialização com bootstrap e cache de consenso.
-  - `client.DialContext(ctx, "tcp", "host:port")` implementando `net.Dialer` e retornando `net.Conn`.
-  - `client.HTTPClient()` retornando um `*http.Client` pronto para uso com tráfego 100% roteado via Tor.
-  - `client.Transport()` expondo o `*http.Transport` subjacente para customizações.
-- **Suporte a Onion Services (.onion v3)**:
-  - Validação estrita de endereços `.onion` v3 (56 caracteres em Base32, checksum SHA3-256 e versão 0x03).
-  - Primitivas para handshake de Rendezvous e Link Specifiers conforme `rend-spec-v3.txt`.
-- **Controle de Fluxo SENDME**:
-  - Implementação completa das janelas de fluxo a nível de circuito (1000 células) e de stream (500 células) per `tor-spec.txt §7.3`.
-  - Emissão automática de `RELAY_SENDME` ao decrementar 100 células no circuito e 50 células no stream, permitindo transferências contínuas de grandes volumes de dados sem engasgos ou pausas pelos relays.
-- **Guards Persistentes em Disco**:
-  - Persistência automática do nó Guard primário em disco (`~/.torogo/guards.json`), mitigando ataques de correlação estatística e rastreamento a longo prazo.
-  - Reutilização inteligente com fallback e opções de customização (`WithGuardFile`, `WithDisableGuards`).
+- **100% Go Standard Library**: Zero external dependencies in `go.mod` / `go.sum`, compiles statically with `CGO_ENABLED=0`.
+- **Idiomatic Library API**:
+  - `torogo.NewClient(ctx, opts...)` with automatic bootstrap and cached consensus.
+  - `client.DialContext(ctx, "tcp", "host:port")` implementing `net.Dialer` returning standard `net.Conn`.
+  - `client.HTTPClient()` returning a ready-to-use `*http.Client` with 100% of traffic routed through Tor circuits.
+  - `client.Transport()` exposing the underlying `*http.Transport` for custom pooling or timeouts.
+- **Drop-in Tor Daemon Replacement**:
+  - `client.ListenSOCKS5("127.0.0.1:9050")` runs a local SOCKS5 proxy server. Any application on the operating system (cURL, Firefox, Telegram, Git, Python) can use it identically to the official C `tor` daemon.
+  - `client.ListenControl("127.0.0.1:9051")` runs a Tor Control Port server compatible with `control-spec.txt` (`AUTHENTICATE`, `PROTOCOLINFO`, `SIGNAL NEWNYM`, `GETINFO`).
+- **Zero DNS Leak**:
+  - In `DialContext` and `HTTPClient`, hostnames are **never** resolved locally. The raw domain name is sent inside the encrypted `RELAY_BEGIN` cell directly to the Exit Node, which resolves it remotely on the Tor network.
+  - `client.Resolve(ctx, "example.com")` performs remote DNS resolution over Tor using `RELAY_RESOLVE` (`tor-spec.txt §6.4`) without opening a TCP connection.
+- **Distroless & Container Ready**: Compiles into a single static binary runnable in minimalist images like `gcr.io/distroless/static-debian12`.
+- **Onion Services v3 (.onion)**:
+  - Strict validation of v3 `.onion` addresses (56 Base32 characters, SHA3-256 checksum, and version `0x03`).
+  - HSDir hash ring indexing, descriptor layer decryption (AES-256-CTR / HMAC-SHA256), and rendezvous cell primitives (`rend-spec-v3.txt`).
+- **SENDME Flow Control**:
+  - Full flow control window management at circuit level (1000 cells) and stream level (500 cells) per `tor-spec.txt §7.3`.
+  - Continuous large-file transfers without stalls or relay disconnects.
+- **Persistent Guards on Disk**:
+  - Automatically pins primary Guard relays to disk (`~/.torogo/guards.json`), mitigating long-term statistical profiling attacks.
+  - Intelligent failure recovery, automatic rotation, and customizable options (`WithGuardFile`, `WithDisableGuards`).
 - **Pluggable Transports & SOCKS5 Bridges**:
-  - Discador SOCKS5 RFC 1928 integrado em Go puro para rotear enlaces através de pontes de ofuscação (obfs4, Snowflake, meek).
-  - Parser de linhas `Bridge` padrão do Tor (`Bridge obfs4 IP:Port Fingerprint cert=... iat-mode=...`).
-  - Gerenciador de subprocessos compatível com a especificação Tor PT v2.1 IPC (`TOR_PT_MANAGED_TRANSPORT_VER=1`).
-- **Compatível com Distroless**: Pronto para ser empacotado em imagens mínimas e estáticas (`gcr.io/distroless/static-debian12`).
-- **Bootstrap de Diretório**:
-  - Download do consenso de microdescritores das Directory Authorities oficiais.
-  - Validação criptográfica das assinaturas de consenso (RSA-SHA256 PKCS#1 v1.5).
-  - Download e verificação de integridade SHA-256 dos microdescritores dos relays.
-- **Seleção de Caminho**:
-  - Seleção balanceada de nós Guard, Middle e Exit com suporte a qualquer porta de destino.
-  - Isolamento de sub-redes (`/16`) para evitar relays correlacionados no mesmo circuito.
-- **Link Handshake (v4/v5)**:
-  - Troca de células `VERSIONS`, `CERTS`, `AUTH_CHALLENGE` e `NETINFO`.
-  - Validação de certificados de relay Ed25519 (tipos 4 e 5) contra as chaves de identidade.
-- **Criação de Circuitos de 3 Saltos**:
-  - `CREATE2` para o nó de guarda e `EXTEND2` sucessivos para o nó intermediário e de saída.
-  - Handshake de chaves moderno **ntor** (Curve25519 / X25519, HKDF-SHA256, HMAC-SHA256).
-- **Criptografia em Camadas (Onion Routing)**:
-  - Criptografia simétrica AES-128-CTR e digest contínuo SHA-1 por salto (forward/backward).
-- **Streams e Conexão TLS**:
-  - Implementa a interface `net.Conn` sobre células `RELAY_BEGIN`, `RELAY_DATA`, `RELAY_CONNECTED` e `RELAY_END`.
-  - Negociação TLS 1.2/1.3 sobre o stream para requisição HTTPS segura.
+  - Pure Go RFC 1928 SOCKS5 client dialer to route link connections through local bridge proxies (obfs4, Snowflake, meek).
+  - Parser for official Tor Project `Bridge` lines (`Bridge obfs4 IP:Port Fingerprint cert=... iat-mode=...`).
+  - Tor PT v2.1 managed subprocess launcher (`TOR_PT_MANAGED_TRANSPORT_VER=1`).
+- **Bandwidth-Weighted Path Selection & Family Exclusion**:
+  - Weighted random sampling using consensus bandwidth weights (`Wgg`, `Wgd`, `Wmg`, `Wmm`, `Wee`, `Wed`).
+  - Enforces subnet `/16` isolation and node family exclusion (`sameFamily`) across all circuit hops.
+- **Traffic Padding Keep-Alive**:
+  - Generates and handles `CmdPadding` cells per `padding-spec.txt` to keep idle circuits alive through NAT and firewall boundaries.
 
 ---
 
-## Uso como Biblioteca (Go Library)
-
-Para usar o `torogo` em outro projeto:
+## Installation
 
 ```bash
 go get github.com/pedromol/torogo
 ```
 
-### Exemplo 1: Requisições HTTP com `*http.Client`
+---
+
+## Library Usage
+
+### 1. HTTP Requests with `*http.Client`
 
 ```go
 package main
@@ -74,14 +69,14 @@ import (
 func main() {
 	ctx := context.Background()
 
-	// Inicializa o cliente Tor (baixa e valida o consenso)
+	// Initialize Tor client (downloads and validates consensus)
 	client, err := torogo.NewClient(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer client.Close()
 
-	// Obtém um *http.Client padrão do Go roteado via Tor
+	// Standard Go *http.Client routed through Tor
 	httpClient := client.HTTPClient()
 
 	resp, err := httpClient.Get("https://check.torproject.org/api/ip")
@@ -92,10 +87,11 @@ func main() {
 
 	body, _ := io.ReadAll(resp.Body)
 	fmt.Println(string(body))
+	// Output: {"IsTor":true,"IP":"..."}
 }
 ```
 
-### Exemplo 2: Conexão TCP genérica com `DialContext` (`net.Conn`)
+### 2. Generic TCP Streams with `DialContext` (`net.Conn`)
 
 ```go
 package main
@@ -117,20 +113,20 @@ func main() {
 	}
 	defer client.Close()
 
-	// Disca qualquer endereço TCP através de um circuito de 3 saltos
+	// Connects to any TCP endpoint through a 3-hop Tor circuit
 	conn, err := client.DialContext(ctx, "tcp", "check.torproject.org:443")
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer conn.Close()
 
-	fmt.Println("Conectado com sucesso via Tor!", conn.RemoteAddr())
+	fmt.Println("Connected securely via Tor circuit!", conn.RemoteAddr())
 }
 ```
 
-### Exemplo 3: Servidor SOCKS5 Local (Drop-in para o binário `tor`)
+### 3. Local SOCKS5 Proxy Daemon (Drop-in Replacement for C `tor`)
 
-Qualquer aplicação externa (cURL, Firefox, Telegram, Git, scripts Python) pode se conectar através do Torogo sem precisar do binário C `tor` instalado:
+Run a local SOCKS5 proxy server on port 9050. Any external tool (cURL, Firefox, Telegram, Git, Python scripts) can route its traffic through Tor without needing the C `tor` package installed:
 
 ```go
 package main
@@ -150,122 +146,109 @@ func main() {
 	}
 	defer client.Close()
 
-	// Inicia um servidor proxy SOCKS5 local na porta 9050 padrão do Tor
-	srv, err := client.ListenSOCKS5("127.0.0.1:9050")
+	// Listen on default Tor SOCKS5 port 9050
+	server, err := client.ListenSOCKS5("127.0.0.1:9050")
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer srv.Close()
+	defer server.Close()
 
-	fmt.Println("SOCKS5 proxy rodando em", srv.Addr())
-	select {} // bloqueia mantendo o daemon ativo
+	fmt.Println("Torogo SOCKS5 proxy running on", server.Addr())
+	select {} // Keep server running
 }
 ```
 
-E no terminal:
+In your terminal:
 ```bash
 curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip
 ```
 
-### Exemplo 4: Resolução de DNS Remota via Tor (Zero DNS Leak)
+### 4. Remote DNS Resolution (Zero Local Leak)
+
+Resolve any domain name remotely at the Exit Node without opening a TCP connection:
 
 ```go
 ips, err := client.Resolve(ctx, "duckduckgo.com")
 if err != nil {
 	log.Fatal(err)
 }
-fmt.Println("IPs resolvidos remotamente pelo Exit Node:", ips)
+fmt.Println("Remote Tor resolved IPs:", ips)
 ```
 
 ---
 
-## Estrutura do Projeto
+## Standalone CLI Usage
+
+Torogo includes a full CLI binary:
+
+```bash
+# Build binary
+go build -o torogo ./cmd/torogo
+
+# 1. Run quick connectivity verification
+./torogo
+
+# 2. Start as a background Tor daemon (SOCKS5 + Control Port)
+./torogo -socks 127.0.0.1:9050 -control 127.0.0.1:9051
+
+# 3. Resolve hostnames remotely via Tor
+./torogo -resolve duckduckgo.com
+```
+
+---
+
+## Project Structure
 
 ```
 torogo/
-├── client.go                 # API pública da biblioteca (Client, DialContext, HTTPClient)
-├── client_test.go            # Testes da API pública
+├── client.go                 # Primary public library API (Client, DialContext, HTTPClient, Resolve)
+├── client_test.go            # Public API unit tests
+├── socks_server.go           # Local SOCKS5 proxy server daemon (RFC 1928)
+├── socks_server_test.go      # SOCKS5 proxy server unit tests
+├── control_server.go         # Tor Control Port server (control-spec.txt)
+├── control_server_test.go    # Control Port unit tests
 ├── cmd/
 │   └── torogo/
-│       └── main.go           # CLI de exemplo utilizando a biblioteca torogo
+│       └── main.go           # Standalone CLI and Tor daemon executable
 ├── internal/
 │   └── tor/
-│       ├── cell.go           # Estruturas e enquadramento de células Tor (fixas e variáveis)
-│       ├── cell_test.go      # Testes de codificação de células
-│       ├── certs.go          # Parsers de certificados de autoridade RSA e certificados Ed25519
-│       ├── circuit.go        # Gerenciamento de circuitos, CREATE2/EXTEND2 e camadas onion
-│       ├── consensus.go      # Autoridades de diretório, parser e validação de consenso
-│       ├── crypto.go         # ntor handshake (X25519/HKDF), RSA raw e criptografia auxiliar
-│       ├── directory.go      # Cliente HTTP de diretório, fetch de microdescritores e seleção de caminho
-│       ├── directory_test.go # Testes de autoridades e utilitários de diretório
-│       ├── embedded_certs.go # Suporte a certificados de autoridade embutidos
-│       ├── flow_control_test.go # Testes de janelas e fluxo SENDME
-│       ├── guards.go         # Gerenciamento e persistência de Guards em disco
-│       ├── guards_test.go    # Testes de persistência e seleção de Guards
-│       ├── link.go           # Conexão de enlace TLS e handshake de link
-│       ├── ntor_test.go      # Testes do handshake ntor
-│       ├── onion.go          # Endereços Onion v3, checksum SHA3-256 e rendezvous
-│       ├── onion_test.go     # Testes de validação de endereços .onion
-│       ├── pt.go             # Pluggable Transports, discador SOCKS5 e bridges
-│       ├── pt_test.go        # Testes de pontes e cliente SOCKS5
-│       └── stream.go         # Abstração de stream multiplexada sobre o circuito (net.Conn)
+│       ├── cell.go           # Fixed (509B) and variable cell framing
+│       ├── cell_test.go      # Cell encoding and padding tests
+│       ├── certs.go          # RSA authority certs and Ed25519 cert parsers
+│       ├── circuit.go        # Circuit lifecycle, onion wrapping, SENDME flow control, and remote resolve
+│       ├── consensus.go      # Directory Authorities, microdesc consensus parsing, signatures, bandwidth weights
+│       ├── crypto.go         # ntor handshake (Curve25519/X25519, HKDF-SHA256, HMAC-SHA256)
+│       ├── directory.go      # Directory client, microdescriptor fetcher, bandwidth-weighted path selection
+│       ├── directory_test.go # Authority tests, bandwidth weighting, and family exclusion tests
+│       ├── embedded_certs.go # Embedded fallback authority certificates
+│       ├── flow_control_test.go # Circuit and stream SENDME window tests
+│       ├── guards.go         # Persistent Guard nodes on disk (~/.torogo/guards.json)
+│       ├── guards_test.go    # Guard persistence and selection tests
+│       ├── link.go           # TLS link connection and link handshake (v4/v5)
+│       ├── ntor_test.go      # ntor v3 handshake unit tests
+│       ├── onion.go          # Onion v3 address decoding, SHA3-256 checksum, HSDir ring, descriptor decryption
+│       ├── onion_test.go     # Onion address, checksum, and descriptor crypto tests
+│       ├── pt.go             # Pluggable Transports client, SOCKS5 client dialer, and bridge parsing
+│       ├── pt_test.go        # Bridge lines and SOCKS5 client dialer tests
+│       ├── resolve_test.go   # Remote RELAY_RESOLVE parser tests
+│       └── stream.go         # Stream multiplexer over Tor circuits (net.Conn)
 ├── docs/
-│   ├── ARCHITECTURE.md       # Documentação detalhada da arquitetura e protocolo interno
+│   ├── ARCHITECTURE.md       # Comprehensive architectural and protocol documentation
 │   └── plans/
-│       └── pure-go-tor-plan.md # Especificação e plano de implementação original
-├── Dockerfile                # Build multi-stage para container distroless estático
-└── go.mod                    # Módulo Go puro (sem dependências)
+│       └── pure-go-tor-plan.md # Original engineering design specification
+├── Dockerfile                # Multi-stage build for static distroless container
+└── go.mod                    # Pure Go module (zero external dependencies)
 ```
 
 ---
 
-## Pré-requisitos
+## Requirements
 
-- Go 1.24 ou superior (testado com Go 1.27).
-- Acesso à internet para conexão com os relays e autoridades da rede Tor.
-
----
-
-## Como Executar o Exemplo CLI
-
-### 1. Executando localmente
-
-```bash
-go run ./cmd/torogo
-```
-
-Saída esperada:
-```text
-initializing torogo client...
-making HTTP request over Tor...
-circuit established
-IsTor=true IP=192.42.116.68
-```
-
-### 2. Rodando os testes unitários
-
-```bash
-go test -v ./...
-```
-
-### 3. Compilando binário estático
-
-```bash
-CGO_ENABLED=0 go build -ldflags "-s -w" -o torclient ./cmd/torogo
-./torclient
-```
-
-### 4. Executando via Docker (Distroless)
-
-```bash
-docker build -t torogo .
-docker run --rm torogo
-```
+- Go 1.24 or higher (tested with Go 1.27).
+- Internet access to connect to official Directory Authorities and Tor relays.
 
 ---
 
-## Referências da Especificação Tor
+## License
 
-- [tor-spec.txt](https://spec.torproject.org/tor-spec): Formato de células, handshakes de link, ntor e crypto de relay.
-- [dir-spec.txt](https://spec.torproject.org/dir-spec): Protocolo de diretórios, consensos de microdescritores e assinaturas.
-- [cert-spec.txt](https://spec.torproject.org/cert-spec): Formato e extensões de certificados Ed25519.
+MIT License. See [LICENSE](LICENSE) for details.

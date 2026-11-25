@@ -1,85 +1,92 @@
 # AGENTS.md — Torogo Project Guidelines for AI Agents
 
-Este documento contém contexto técnico, restrições e diretrizes essenciais para agentes de IA que realizam manutenção ou evolução deste repositório.
+This document contains technical context, constraints, and essential guidelines for AI agents maintaining or evolving this repository.
 
 ---
 
-## 1. Visão Geral e Princípios Fundamentais
+## 1. Overview and Core Principles
 
-O **Torogo** é um cliente da rede Tor implementado do zero em **Go puro**.
-Os seguintes princípios **nunca** devem ser violados:
+**Torogo** is a pure Go implementation of a Tor network client built from scratch.
+The following principles **must never** be violated:
 
-1. **Zero Dependências Externas (R1 & R2)**:
-   - O projeto deve usar **exclusivamente** pacotes da biblioteca padrão do Go (`crypto/*`, `net/*`, `encoding/*`, `compress/zlib`, `io`, `time`, etc.).
-   - Não adicione bibliotecas externas ao `go.mod` (`go get` não deve ser usado para bibliotecas terceiras).
-   - Não utilize CGO (`CGO_ENABLED=0`).
-   - Não dependa de binários externos do sistema operacional (como o binário `tor`).
-2. **Binário Estático & Distroless (R3)**:
-   - O binário deve compilar estaticamente e rodar em containers minimalistas como `gcr.io/distroless/static-debian12`.
-3. **Fidelidade à Especificação Tor**:
-   - Todo comportamento na wire-spec deve respeitar estritamente as especificações oficiais: `tor-spec.txt`, `dir-spec.txt` e `cert-spec.txt`.
+1. **Zero External Dependencies (R1 & R2)**:
+   - The project uses **exclusively** Go standard library packages (`crypto/*`, `net/*`, `encoding/*`, `compress/zlib`, `io`, `time`, etc.).
+   - Do not add external dependencies to `go.mod` (`go get` must not be used for third-party libraries).
+   - Do not use CGO (`CGO_ENABLED=0`).
+   - Do not depend on external operating system binaries (such as the C `tor` binary).
+2. **Static Binary & Distroless (R3)**:
+   - Binaries must compile statically and run in minimalist containers like `gcr.io/distroless/static-debian12`.
+3. **Tor Specification Fidelity**:
+   - All wire-spec behavior must strictly follow official Tor specifications: `tor-spec.txt`, `dir-spec.txt`, `cert-spec.txt`, `rend-spec-v3.txt`, `path-spec.txt`, `padding-spec.txt`, and `control-spec.txt`.
 
 ---
 
-## 2. Mapa da Arquitetura
+## 2. Architecture Map
 
-- `client.go` (raiz, `package torogo`):
-  - API pública principal da biblioteca.
-  - Implementa `NewClient`, `DialContext`, `Dial`, `Transport` e `HTTPClient`.
-  - Cache de consenso em memória (`getConsensus`) com validação temporal thread-safe (`sync.RWMutex`).
-  - Encapsula streams e circuitos em `torConn` para fechamento automático de circuitos e enlaces TLS ao fechar a conexão `net.Conn`.
+- `client.go` (root, `package torogo`):
+  - Primary public library API (`Client`, `DialContext`, `Dial`, `Transport`, `HTTPClient`, `Resolve`).
+  - Thread-safe consensus cache (`getConsensus`) validated against validity windows (`sync.RWMutex`).
+  - Stream/circuit encapsulation (`torConn`) for automatic cleanup on `net.Conn.Close()`.
+
+- `socks_server.go`:
+  - RFC 1928 SOCKS5 proxy server daemon (`client.ListenSOCKS5`).
+  - Serves as a drop-in replacement for the official C `tor` daemon on port `9050` with zero local DNS leakage.
+
+- `control_server.go`:
+  - Tor Control Port server (`control-spec.txt`, `client.ListenControl`).
+  - Listens on port `9051` handling `AUTHENTICATE`, `PROTOCOLINFO`, `SIGNAL NEWNYM`, `GETINFO`, and `SETEVENTS`.
 
 - `cmd/torogo/main.go`:
-  - Aplicação CLI e teste de integração executável.
-  - Utiliza diretamente a biblioteca `torogo.NewClient(ctx)` e `client.HTTPClient()`.
+  - CLI application and integration tester.
+  - Supports daemon mode (`-socks 127.0.0.1:9050 -control 127.0.0.1:9051`), remote DNS lookup (`-resolve <host>`), and live connectivity check.
 
 - `internal/tor/`:
-  - `cell.go`: Células fixas (509 bytes) e variáveis. Comandos `VERSIONS`, `CERTS`, `NETINFO`, `CREATE2`, `CREATED2`, `RELAY`, `RELAY_EARLY`.
-  - `link.go`: Enlace TLS sobre a porta ORPort. Link handshake v4/v5 (`VERSIONS` → `CERTS` → `AUTH_CHALLENGE` → `NETINFO`).
-  - `circuit.go`: Criação de circuitos (`NewCircuit`, `Extend`) e gerenciamento de camadas de criptografia (onion wrapping).
-  - `crypto.go`: Implementação do handshake **ntor** (Curve25519/X25519, HKDF-SHA256, HMAC-SHA256) e verificação RSA PKCS#1 v1.5 raw.
-  - `consensus.go`: Estrutura de dados de consenso, lista de Directory Authorities, parser de consenso de microdescritores e verificação de assinaturas das autoridades.
-  - `directory.go`: Download HTTP de documentos de consenso e microdescritores (`/tor/micro/d/...`), seleção aleatória ponderada de nós para o circuito (`SelectPathForPort`).
-  - `certs.go`: Parser de certificados de chave de autoridade RSA (`dir-key-certificate-version 3`) e certificados Ed25519 (tipos 4 e 5).
-  - `stream.go`: Implementa `net.Conn` para multiplexar streams TCP sobre células de relay (`RELAY_BEGIN`, `RELAY_DATA`, `RELAY_CONNECTED`, `RELAY_END`).
+  - `cell.go`: Fixed (509 bytes) and variable cells. Commands `VERSIONS`, `CERTS`, `NETINFO`, `CREATE2`, `CREATED2`, `RELAY`, `RELAY_EARLY`, `PADDING`.
+  - `link.go`: TLS link over relay ORPort. Handshake v4/v5 (`VERSIONS` → `CERTS` → `AUTH_CHALLENGE` → `NETINFO`).
+  - `circuit.go`: Circuit creation (`NewCircuit`, `Extend`), onion wrapping layers, SENDME flow control, and remote DNS resolve (`RELAY_RESOLVE`).
+  - `crypto.go`: **ntor** handshake (Curve25519/X25519, HKDF-SHA256, HMAC-SHA256) and raw RSA PKCS#1 v1.5 verification.
+  - `consensus.go`: Consensus data structures, Directory Authorities, microdescriptor parsing, authority signature quorum, and bandwidth weights.
+  - `directory.go`: HTTP fetching of consensus and microdescriptors (`/tor/micro/d/...`), bandwidth-weighted path selection, and family exclusion (`SelectPathWithGuards`).
+  - `certs.go`: RSA authority certificates (`dir-key-certificate-version 3`) and Ed25519 certificates (types 4 and 5).
+  - `stream.go`: `net.Conn` stream multiplexer over relay cells (`RELAY_BEGIN`, `RELAY_DATA`, `RELAY_CONNECTED`, `RELAY_END`, `RELAY_BEGIN_DIR`).
+  - `guards.go`: Persistent disk storage for Guard nodes (`~/.torogo/guards.json`), failure tracking, and automatic rotation.
+  - `onion.go`: Onion v3 address decoding/validation (SHA3-256 checksum), HSDir hash ring calculation, descriptor layer decryption (AES-256-CTR/HMAC-SHA256), and rendezvous primitives.
+  - `pt.go`: Pluggable Transports client, pure Go SOCKS5 client dialer, bridge line parsing, and Tor PT v2.1 managed process runner.
 
 ---
 
-## 3. Peculiaridades Críticas do Protocolo (Armadilhas Comuns)
+## 3. Protocol Peculiarities & Pitfalls
 
-Ao alterar ou estender o código, atente-se para os seguintes detalhes da especificação:
+When modifying or extending the code, adhere to these critical specification details:
 
-### Consenso e Assinaturas (`dir-spec.txt`)
-- **Signed Range:** O texto assinado pelas autoridades de diretório começa no início de `network-status-version` e termina exatamente no espaço logo após a primeira ocorrência de `directory-signature ` (inclusive).
-- **Linha `directory-signature`:** O formato é `directory-signature [algorithm] <identity-digest> <signing-key-digest>`. A assinatura criptográfica **não** está nesta linha; ela vem encapsulada no bloco PEM subsequente (`-----BEGIN SIGNATURE-----`).
-- **Microdescritores:** As URLs de download `/tor/micro/d/<digest>` usam Base64 **sem padding** (`base64.RawStdEncoding`). Usar padding `=` causará erro HTTP 404 nos servidores de diretório.
+### Consensus & Signatures (`dir-spec.txt`)
+- **Signed Range:** Signed text begins at the start of `network-status-version` and ends immediately after the first `directory-signature ` space (inclusive).
+- **`directory-signature` line:** Format is `directory-signature [algorithm] <identity-digest> <signing-key-digest>`. The cryptographic signature is in the subsequent PEM block (`-----BEGIN SIGNATURE-----`).
+- **Microdescriptors:** URL path `/tor/micro/d/<digest>` uses **unpadded** Base64 (`base64.RawStdEncoding`). Using padding `=` causes HTTP 404 errors on directory caches.
 
-### Célula NETINFO (`tor-spec.txt §4.5`)
-- O payload de `NETINFO` contém:
+### NETINFO Cell (`tor-spec.txt §4.5`)
+- Payload structure:
   - `Timestamp` [4 bytes]
-  - `OTHERADDR`: `ATYPE` [1 byte: 0x04 para IPv4], `ALEN` [1 byte: 4], `AVAL` [4 bytes]
-  - `NMYADDR` [1 byte: 0x00 se não divulgado]
-- Não envie `ATYPE = 0`, pois relays encerram a conexão imediatamente.
+  - `OTHERADDR`: `ATYPE` [1 byte: 0x04 for IPv4], `ALEN` [1 byte: 4], `AVAL` [4 bytes]
+  - `NMYADDR` [1 byte: 0x00 if undisclosed]
+- Never send `ATYPE = 0`, as relays immediately close the connection.
 
-### Célula CREATED2 (`tor-spec.txt §5.1`)
-- Diferente de `CREATE2` (que inclui `HTYPE` de 2 bytes), a célula de resposta `CREATED2` **não** possui o campo `HTYPE`.
-- O payload inicia diretamente com `HLEN` (2 bytes, big-endian) seguido por `HDATA` (`HLEN` bytes).
+### CREATED2 Cell (`tor-spec.txt §5.1`)
+- Unlike `CREATE2` (which starts with a 2-byte `HTYPE`), `CREATED2` does **not** include `HTYPE`.
+- The payload starts directly with `HLEN` (2 bytes, big-endian) followed by `HDATA` (`HLEN` bytes).
 
-### Certificados Ed25519 (`cert-spec.txt §2`)
-- Na seção de extensões dos certificados Ed25519, cada extensão possui:
-  - `ExtLen` [2 bytes big-endian]
-  - `ExtType` [1 byte]
-  - `ExtFlags` [1 byte]
-  - `ExtData` [`ExtLen` bytes]
+### Remote DNS & Zero Leakage (`tor-spec.txt §6.2 / §6.4`)
+- Hostnames are sent as raw strings inside `RELAY_BEGIN` or `RELAY_RESOLVE` cells.
+- The local host must never call `net.LookupIP` or OS resolvers; all DNS resolution occurs remotely at the Exit Node.
 
 ---
 
-## 4. Diretrizes de Desenvolvimento e Testes
+## 4. Development & Testing Guidelines
 
-- **Testes Unitários**: Sempre execute `go test -v ./...` antes de concluir qualquer alteração.
-- **Teste de Integração Real**: Para verificar a saúde contra a rede Tor viva, execute:
+- **Unit Tests**: Always run `go test -v ./...` before concluding changes.
+- **Live Integration Testing**: To verify health against the live Tor network:
   ```bash
   go run ./cmd/torogo
   ```
-  O comando deve imprimir `circuit established` e `IsTor=true` com o IP de saída.
-- **Formatação e Lint**: Siga o padrão idiomático Go (`gofmt` / `go vet`).
+  The command should output `circuit established` and `IsTor=true` with an external exit IP.
+- **Formatting and Linting**: Adhere strictly to idiomatic Go standards (`gofmt` / `go vet`).

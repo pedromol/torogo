@@ -24,12 +24,12 @@ Tor anonymity requires routing TCP streams through at least 3 relays. The Tor pr
 - **R3.** Binary builds as `CGO_ENABLED=0` and runs in `gcr.io/distroless/static-debian12` (no shell, no extra binaries).
 - **R4.** Circuit must be a full 3-hop path (guard → middle → exit) using ntor key handshakes.
 - **R8.** The handshake must use **ntor-v3** (the modern ntor key format; ntorv3 is the successor to ntor and is what current relays accept for CREATE2), verifying the v3 handshake payload format and keys per the ntorv3 spec.
-- **R5.** HTTPS GET to `https://check.torproject.org/` must traverse the Tor exit; result printed to stdout as `"está usando Tor: sim <exit-ip>"` or `"está usando Tor: não"`.
+- **R5.** HTTPS GET to `https://check.torproject.org/` must traverse the Tor exit; result printed to stdout as `"IsTor: true <exit-ip>"` or `"IsTor: false"`.
 - **R6.** Directory bootstrap authenticates consensus/microdescriptors against embedded authority ed25519 public keys; TLS to authorities uses `InsecureSkipVerify` + signature validation.
 - **R7.** Output must include Tor‑detection verdict and the observed exit IP address.
 
 ### Acceptance Examples
-- `./torclient` → prints `"está usando Tor: sim 203.0.113.42"` (example exit IP)
+- `./torclient` → prints `"circuit established\nIsTor=true IP=203.0.113.42"` (example exit IP)
 - `docker run --rm my-tor-image` → same output, no shell access
 - Binary size under 10 MB static
 
