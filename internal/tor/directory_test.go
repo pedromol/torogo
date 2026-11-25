@@ -60,6 +60,61 @@ func TestAuthorityLookup(t *testing.T) {
 	})
 }
 
+func TestBandwidthWeightedSelection(t *testing.T) {
+	bwWeights := map[string]int64{
+		"Wgg": 10000,
+		"Wgd": 5000,
+		"Wmg": 5000,
+		"Wmm": 10000,
+		"Wee": 10000,
+		"Wed": 10000,
+	}
+
+	rs1 := &RouterStatus{
+		Nickname:  "SmallGuard",
+		Bandwidth: 100,
+		Flags:     map[string]bool{"Guard": true},
+	}
+	rs2 := &RouterStatus{
+		Nickname:  "BigGuard",
+		Bandwidth: 10000,
+		Flags:     map[string]bool{"Guard": true},
+	}
+
+	w1 := routerWeightForPosition(rs1, PosGuard, bwWeights)
+	w2 := routerWeightForPosition(rs2, PosGuard, bwWeights)
+
+	if w2 <= w1 {
+		t.Fatalf("expected BigGuard weight (%d) > SmallGuard weight (%d)", w2, w1)
+	}
+
+	shuffled := weightedShuffleRouters([]*RouterStatus{rs1, rs2}, PosGuard, bwWeights)
+	if len(shuffled) != 2 {
+		t.Fatalf("expected 2 routers, got %d", len(shuffled))
+	}
+}
+
+func TestRelayFamilyExclusion(t *testing.T) {
+	var id1, id2 [20]byte
+	copy(id1[:], []byte("11111111111111111111"))
+	copy(id2[:], []byte("22222222222222222222"))
+
+	rs1 := &RouterStatus{Nickname: "Node1", Identity: id1}
+	rs2 := &RouterStatus{Nickname: "Node2", Identity: id2}
+
+	md1 := &Microdesc{Family: []string{"NODE2"}}
+	md2 := &Microdesc{}
+
+	if !sameFamily(rs1, md1, rs2, md2) {
+		t.Fatalf("expected rs1 and rs2 to be recognized as same family")
+	}
+
+	md1Unrelated := &Microdesc{Family: []string{"OTHERNODE"}}
+	if sameFamily(rs1, md1Unrelated, rs2, md2) {
+		t.Fatalf("expected unrelated nodes not to be same family")
+	}
+}
+
 func TestShuffledAuthorities(t *testing.T) {
 	shuffled := shuffledAuthorities()
 	if len(shuffled) != len(Authorities) {

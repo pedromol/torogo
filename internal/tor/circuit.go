@@ -10,6 +10,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash"
+	"net"
+	"strings"
 	"sync"
 )
 
@@ -334,4 +336,84 @@ func (c *Circuit) Close() error {
 		return nil
 	}
 	return c.link.Close()
+}
+
+// SendPadding sends a fixed-size padding cell (CmdPadding) on the circuit to keep the connection alive.
+func (c *Circuit) SendPadding() error {
+	pad := make([]byte, CellBodyLen)
+	return c.link.sendCell(c.circID, CmdPadding, pad)
+}
+
+// Resolve performs remote DNS resolution over the Tor circuit per tor-spec.txt §6.4.
+func (c *Circuit) Resolve(host string) ([]net.IP, error) {
+	if c == nil || len(c.hops) == 0 {
+		return nil, fmt.Errorf("tor: circuit has no hops")
+	}
+	id := randomStreamID()
+	payload := []byte(strings.ToLower(host) + "\x00")
+	exit := len(c.hops) - 1
+
+	if err := c.sendRelayCell(exit, CmdRelay, RelayResolve, id, payload); err != nil {
+		return nil, err
+	}
+
+	for {
+		hop, cmd, sid, data, err := c.recvRelayCell()
+		if err != nil {
+			return nil, err
+		}
+		if hop != exit || sid != id {
+			continue
+		}
+		switch cmd {
+		case RelayResolved:
+			return parseResolvedPayload(data)
+		case RelayEnd:
+			return nil, fmt.Errorf("tor: resolve failed: %w", endReasonError(data))
+		}
+	}
+}
+
+func parseResolvedPayload(data []byte) ([]net.IP, error) {
+	var ips []net.IP
+	idx := 0
+	for idx < len(data) {
+		if idx+2 > len(data) {
+			break
+		}
+		ansType := data[idx]
+		ansLen := int(data[idx+1])
+		idx += 2
+		if idx+ansLen > len(data) {
+			break
+		}
+		val := data[idx : idx+ansLen]
+		idx += ansLen
+		if idx+4 <= len(data) {
+			idx += 4 // Discard TTL
+		}
+
+		switch ansType {
+		case 0x04: // IPv4
+			if len(val) == 4 {
+				ip := make(net.IP, 4)
+				copy(ip, val)
+				ips = append(ips, ip)
+			}
+		case 0x06: // IPv6
+			if len(val) == 16 {
+				ip := make(net.IP, 16)
+				copy(ip, val)
+				ips = append(ips, ip)
+			}
+		case 0xF0: // Transient error
+			return nil, fmt.Errorf("tor: transient DNS resolve error")
+		case 0xF1: // Non-transient error
+			return nil, fmt.Errorf("tor: host not found (DNS error)")
+		}
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("tor: no IP addresses returned in RELAY_RESOLVED")
+	}
+	return ips, nil
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"math/big"
@@ -274,9 +275,11 @@ func SelectPathWithGuards(ctx context.Context, cons *Consensus, targetPort int, 
 			exits = append(exits, rs)
 		}
 	}
-	shuffleRouters(guards)
-	shuffleRouters(middles)
-	shuffleRouters(exits)
+
+	bwWeights := cons.BandwidthWeights
+	guards = weightedShuffleRouters(guards, PosGuard, bwWeights)
+	middles = weightedShuffleRouters(middles, PosMiddle, bwWeights)
+	exits = weightedShuffleRouters(exits, PosExit, bwWeights)
 
 	var path Path
 	var err error
@@ -315,6 +318,9 @@ func SelectPathWithGuards(ctx context.Context, cons *Consensus, targetPort int, 
 			err = mdErr
 			continue
 		}
+		if sameFamily(rs, md, path.Routers[0], path.Microdescs[0]) {
+			continue
+		}
 		path.Routers[1], path.Microdescs[1] = rs, md
 		break
 	}
@@ -335,6 +341,9 @@ func SelectPathWithGuards(ctx context.Context, cons *Consensus, targetPort int, 
 			err = mdErr
 			continue
 		}
+		if sameFamily(rs, md, path.Routers[0], path.Microdescs[0]) || sameFamily(rs, md, path.Routers[1], path.Microdescs[1]) {
+			continue
+		}
 		if targetPort > 0 && !md.AcceptsPort(targetPort) {
 			err = fmt.Errorf("tor: exit policy does not accept port %d", targetPort)
 			continue
@@ -346,6 +355,161 @@ func SelectPathWithGuards(ctx context.Context, cons *Consensus, targetPort int, 
 		return nil, fmt.Errorf("tor: no usable exit relay: %w", err)
 	}
 	return &path, nil
+}
+
+type Position int
+
+const (
+	PosGuard Position = iota
+	PosMiddle
+	PosExit
+)
+
+func routerWeightForPosition(rs *RouterStatus, pos Position, bwWeights map[string]int64) int64 {
+	bw := int64(rs.Bandwidth)
+	if bw <= 0 {
+		bw = 1
+	}
+	if len(bwWeights) == 0 {
+		return bw
+	}
+
+	isGuard := rs.HasFlag("Guard")
+	isExit := rs.HasFlag("Exit") && !rs.HasFlag("BadExit")
+
+	var weightScale int64 = 10000
+	var w int64 = weightScale
+
+	switch pos {
+	case PosGuard:
+		if isGuard && isExit {
+			if v, ok := bwWeights["Wgd"]; ok {
+				w = v
+			}
+		} else if isGuard {
+			if v, ok := bwWeights["Wgg"]; ok {
+				w = v
+			}
+		}
+	case PosMiddle:
+		if isGuard && isExit {
+			if v, ok := bwWeights["Wmd"]; ok {
+				w = v
+			}
+		} else if isGuard {
+			if v, ok := bwWeights["Wmg"]; ok {
+				w = v
+			}
+		} else if isExit {
+			if v, ok := bwWeights["Wme"]; ok {
+				w = v
+			}
+		} else {
+			if v, ok := bwWeights["Wmm"]; ok {
+				w = v
+			}
+		}
+	case PosExit:
+		if isGuard && isExit {
+			if v, ok := bwWeights["Wed"]; ok {
+				w = v
+			}
+		} else if isExit {
+			if v, ok := bwWeights["Wee"]; ok {
+				w = v
+			}
+		}
+	}
+
+	res := (bw * w) / weightScale
+	if res <= 0 {
+		return 1
+	}
+	return res
+}
+
+func weightedShuffleRouters(routers []*RouterStatus, pos Position, bwWeights map[string]int64) []*RouterStatus {
+	if len(routers) <= 1 {
+		return append([]*RouterStatus(nil), routers...)
+	}
+
+	pool := append([]*RouterStatus(nil), routers...)
+	weights := make([]int64, len(pool))
+	var totalWeight int64
+	for i, rs := range pool {
+		w := routerWeightForPosition(rs, pos, bwWeights)
+		weights[i] = w
+		totalWeight += w
+	}
+
+	if totalWeight <= 0 {
+		shuffleRouters(pool)
+		return pool
+	}
+
+	limit := 64
+	if limit > len(pool) {
+		limit = len(pool)
+	}
+	out := make([]*RouterStatus, 0, limit)
+
+	for len(out) < limit && len(pool) > 0 && totalWeight > 0 {
+		rVal, err := rand.Int(rand.Reader, big.NewInt(totalWeight))
+		if err != nil {
+			break
+		}
+
+		threshold := rVal.Int64()
+		var running int64
+		picked := len(pool) - 1
+		for i, w := range weights {
+			running += w
+			if running > threshold {
+				picked = i
+				break
+			}
+		}
+
+		out = append(out, pool[picked])
+		totalWeight -= weights[picked]
+
+		last := len(pool) - 1
+		pool[picked] = pool[last]
+		weights[picked] = weights[last]
+		pool = pool[:last]
+		weights = weights[:last]
+	}
+
+	// Append remaining in case limit was reached
+	if len(pool) > 0 {
+		out = append(out, pool...)
+	}
+
+	return out
+}
+
+func sameFamily(rs1 *RouterStatus, md1 *Microdesc, rs2 *RouterStatus, md2 *Microdesc) bool {
+	if rs1 == nil || rs2 == nil {
+		return false
+	}
+	id1Hex := strings.ToUpper(hex.EncodeToString(rs1.Identity[:]))
+	id2Hex := strings.ToUpper(hex.EncodeToString(rs2.Identity[:]))
+
+	if md1 != nil {
+		for _, member := range md1.Family {
+			if member == id2Hex || strings.EqualFold(member, rs2.Nickname) {
+				return true
+			}
+		}
+	}
+	if md2 != nil {
+		for _, member := range md2.Family {
+			if member == id1Hex || strings.EqualFold(member, rs1.Nickname) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func sameRelay(a, b *RouterStatus) bool {

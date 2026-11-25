@@ -57,6 +57,7 @@ type RouterStatus struct {
 	HasMicrodesc  bool
 	PortSummary   []string
 	IPv6          string
+	Bandwidth     uint64
 }
 
 func (r *RouterStatus) HasFlag(flag string) bool {
@@ -68,19 +69,25 @@ func (r *RouterStatus) SummaryAcceptsPort(port int) bool {
 }
 
 type Consensus struct {
-	Raw            []byte
-	ValidAfter     time.Time
-	FreshUntil     time.Time
-	ValidUntil     time.Time
-	Method         int
-	Routers        []*RouterStatus
-	Params         map[string]string
-	Source         *Authority
-	SignatureCount int
+	Raw              []byte
+	ValidAfter       time.Time
+	FreshUntil       time.Time
+	ValidUntil       time.Time
+	Method           int
+	Routers          []*RouterStatus
+	Params           map[string]string
+	BandwidthWeights map[string]int64
+	Source           *Authority
+	SignatureCount   int
 }
 
 func parseConsensus(raw []byte, source *Authority) (*Consensus, error) {
-	c := &Consensus{Raw: append([]byte(nil), raw...), Params: map[string]string{}, Source: source}
+	c := &Consensus{
+		Raw:              append([]byte(nil), raw...),
+		Params:           map[string]string{},
+		BandwidthWeights: map[string]int64{},
+		Source:           source,
+	}
 	lines := bytes.Split(raw, []byte{'\n'})
 	var current *RouterStatus
 	for _, rawLine := range lines {
@@ -128,6 +135,16 @@ func parseConsensus(raw []byte, source *Authority) (*Consensus, error) {
 			}
 			continue
 		}
+		if strings.HasPrefix(line, "bandwidth-weights ") {
+			for _, p := range strings.Fields(strings.TrimPrefix(line, "bandwidth-weights ")) {
+				k, v, ok := strings.Cut(p, "=")
+				if ok {
+					val, _ := strconv.ParseInt(v, 10, 64)
+					c.BandwidthWeights[k] = val
+				}
+			}
+			continue
+		}
 		if strings.HasPrefix(line, "r ") {
 			rs, err := parseRouterStatus(line)
 			if err != nil {
@@ -154,6 +171,13 @@ func parseConsensus(raw []byte, source *Authority) (*Consensus, error) {
 			}
 		case strings.HasPrefix(line, "p "):
 			current.PortSummary = append(current.PortSummary, strings.TrimSpace(line[2:]))
+		case strings.HasPrefix(line, "w "):
+			for _, p := range strings.Fields(strings.TrimPrefix(line, "w ")) {
+				if strings.HasPrefix(p, "Bandwidth=") {
+					bw, _ := strconv.ParseUint(strings.TrimPrefix(p, "Bandwidth="), 10, 64)
+					current.Bandwidth = bw
+				}
+			}
 		case strings.HasPrefix(line, "a "):
 			current.IPv6 = strings.TrimSpace(line[2:])
 		}
@@ -340,6 +364,7 @@ type Microdesc struct {
 	NtorOnionKey []byte
 	Ed25519ID    []byte
 	ExitPolicy   []string
+	Family       []string
 }
 
 func parseMicrodesc(raw []byte) (*Microdesc, error) {
@@ -361,6 +386,11 @@ func parseMicrodesc(raw []byte) (*Microdesc, error) {
 			m.Ed25519ID = v
 		case strings.HasPrefix(line, "p "):
 			m.ExitPolicy = append(m.ExitPolicy, strings.TrimSpace(line[2:]))
+		case strings.HasPrefix(line, "family "):
+			for _, fam := range strings.Fields(strings.TrimPrefix(line, "family ")) {
+				fam = strings.TrimPrefix(fam, "$")
+				m.Family = append(m.Family, strings.ToUpper(fam))
+			}
 		}
 	}
 	if len(m.NtorOnionKey) == 0 || len(m.Ed25519ID) == 0 {

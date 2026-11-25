@@ -74,6 +74,30 @@ func TestFixedCellReadWrite(t *testing.T) {
 	}
 }
 
+func TestPaddingCellFraming(t *testing.T) {
+	var buf bytes.Buffer
+	padBody := make([]byte, CellBodyLen)
+	padBody[0] = 0xAA
+
+	if err := writeCell(&buf, 0, CmdPadding, padBody); err != nil {
+		t.Fatalf("writeCell error: %v", err)
+	}
+
+	cell, err := readCell(&buf)
+	if err != nil {
+		t.Fatalf("readCell error: %v", err)
+	}
+	if cell.CircID != 0 {
+		t.Errorf("expected circID 0, got %d", cell.CircID)
+	}
+	if cell.Command != CmdPadding {
+		t.Errorf("expected CmdPadding (%d), got %d", CmdPadding, cell.Command)
+	}
+	if cell.Body[0] != 0xAA {
+		t.Errorf("expected padBody[0] 0xAA, got 0x%02x", cell.Body[0])
+	}
+}
+
 func TestVariableCellReadWrite(t *testing.T) {
 	var buf bytes.Buffer
 	circID := uint32(0)

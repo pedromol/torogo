@@ -207,3 +207,9 @@ func (l *Link) Close() error {
 	}
 	return l.conn.Close()
 }
+
+// SendPadding sends a link-level padding cell (CmdPadding with circID 0) to prevent NAT/firewall timeouts.
+func (l *Link) SendPadding() error {
+	pad := make([]byte, CellBodyLen)
+	return l.sendCell(0, CmdPadding, pad)
+}
