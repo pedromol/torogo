@@ -1,0 +1,26 @@
+# Binaries
+/torogo
+/torclient
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts & coverage
+*.test
+*.out
+coverage.txt
+*.prof
+
+# IDE & Editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Scratch & temporary files
+test_*.go
+*.tmp
