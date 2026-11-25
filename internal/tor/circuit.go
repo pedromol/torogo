@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash"
+	"sync"
 )
 
 type Hop struct {
@@ -22,10 +23,24 @@ type Hop struct {
 	bwdDigest hash.Hash
 }
 
+const (
+	CircWindowInit      = 1000
+	CircWindowIncrement = 100
+	CircWindowThreshold = CircWindowInit - CircWindowIncrement // 900
+
+	StreamWindowInit      = 500
+	StreamWindowIncrement = 50
+	StreamWindowThreshold = StreamWindowInit - StreamWindowIncrement // 450
+)
+
 type Circuit struct {
-	link   *Link
-	circID uint32
-	hops   []*Hop
+	link          *Link
+	circID        uint32
+	hops          []*Hop
+	sendMu        sync.Mutex
+	recvMu        sync.Mutex
+	packageWindow int
+	deliverWindow int
 }
 
 func NewCircuit(link *Link, rs *RouterStatus, md *Microdesc) (*Circuit, error) {
@@ -43,7 +58,12 @@ func NewCircuit(link *Link, rs *RouterStatus, md *Microdesc) (*Circuit, error) {
 	copy(body[4:24], rs.Identity[:])
 	copy(body[24:56], md.NtorOnionKey)
 	copy(body[56:88], ntor.PublicKey())
-	c := &Circuit{link: link, circID: circID}
+	c := &Circuit{
+		link:          link,
+		circID:        circID,
+		packageWindow: CircWindowInit,
+		deliverWindow: CircWindowInit,
+	}
 	if err := link.sendCell(circID, CmdCreate2, body); err != nil {
 		return nil, err
 	}
@@ -178,6 +198,9 @@ func newHop(rs *RouterStatus, md *Microdesc, keys *HopKeys) (*Hop, error) {
 }
 
 func (c *Circuit) sendRelayCell(hopIndex int, cellCmd, relayCmd byte, streamID uint16, data []byte) error {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+
 	if hopIndex < 0 || hopIndex >= len(c.hops) {
 		return fmt.Errorf("tor: bad hop index %d", hopIndex)
 	}
@@ -192,10 +215,16 @@ func (c *Circuit) sendRelayCell(hopIndex int, cellCmd, relayCmd byte, streamID u
 	for i := 0; i <= hopIndex; i++ {
 		c.hops[i].fwd.XORKeyStream(body, body)
 	}
+	if cellCmd == CmdRelay && relayCmd == RelayData {
+		c.packageWindow--
+	}
 	return c.link.sendCell(c.circID, cellCmd, body)
 }
 
 func (c *Circuit) recvRelayCell() (int, byte, uint16, []byte, error) {
+	c.recvMu.Lock()
+	defer c.recvMu.Unlock()
+
 	for {
 		cell, err := c.link.recvCell()
 		if err != nil {
@@ -230,7 +259,20 @@ func (c *Circuit) recvRelayCell() (int, byte, uint16, []byte, error) {
 					return -1, 0, 0, nil, fmt.Errorf("tor: relay payload too long")
 				}
 				data := append([]byte(nil), body[11:11+l]...)
-				return i, body[0], binary.BigEndian.Uint16(body[3:5]), data, nil
+				cmd := body[0]
+				sid := binary.BigEndian.Uint16(body[3:5])
+
+				if cmd == RelayData {
+					c.deliverWindow--
+					if c.deliverWindow <= CircWindowThreshold {
+						_ = c.sendRelayCell(i, CmdRelay, RelaySendme, 0, nil)
+						c.deliverWindow += CircWindowIncrement
+					}
+				} else if cmd == RelaySendme && sid == 0 {
+					c.packageWindow += CircWindowIncrement
+				}
+
+				return i, cmd, sid, data, nil
 			}
 		}
 	}

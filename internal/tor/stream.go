@@ -7,14 +7,18 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 )
 
 type Stream struct {
-	circuit *Circuit
-	id      uint16
-	pending []byte
-	closed  bool
+	circuit       *Circuit
+	id            uint16
+	mu            sync.Mutex
+	pending       []byte
+	closed        bool
+	packageWindow int
+	deliverWindow int
 }
 
 func (c *Circuit) OpenStream(host string, port int) (*Stream, error) {
@@ -27,7 +31,12 @@ func (c *Circuit) OpenStream(host string, port int) (*Stream, error) {
 	if err := c.sendRelayCell(exit, CmdRelay, RelayBegin, id, []byte(target)); err != nil {
 		return nil, err
 	}
-	s := &Stream{circuit: c, id: id}
+	s := &Stream{
+		circuit:       c,
+		id:            id,
+		packageWindow: StreamWindowInit,
+		deliverWindow: StreamWindowInit,
+	}
 	for {
 		hop, cmd, sid, data, err := c.recvRelayCell()
 		if err != nil {
@@ -46,6 +55,11 @@ func (c *Circuit) OpenStream(host string, port int) (*Stream, error) {
 			s.closed = true
 			return nil, endReasonError(data)
 		case RelayData:
+			s.deliverWindow--
+			if s.deliverWindow <= StreamWindowThreshold {
+				_ = c.sendRelayCell(exit, CmdRelay, RelaySendme, s.id, nil)
+				s.deliverWindow += StreamWindowIncrement
+			}
 			s.pending = append(s.pending, data...)
 		}
 	}
@@ -55,14 +69,20 @@ func (s *Stream) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+
+	s.mu.Lock()
 	if len(s.pending) > 0 {
 		n := copy(p, s.pending)
 		s.pending = s.pending[n:]
+		s.mu.Unlock()
 		return n, nil
 	}
 	if s.closed {
+		s.mu.Unlock()
 		return 0, io.EOF
 	}
+	s.mu.Unlock()
+
 	exit := len(s.circuit.hops) - 1
 	for {
 		hop, cmd, sid, data, err := s.circuit.recvRelayCell()
@@ -75,37 +95,94 @@ func (s *Stream) Read(p []byte) (int, error) {
 		if sid != s.id {
 			continue
 		}
+		s.mu.Lock()
 		switch cmd {
 		case RelayData:
+			s.deliverWindow--
+			if s.deliverWindow <= StreamWindowThreshold {
+				_ = s.circuit.sendRelayCell(exit, CmdRelay, RelaySendme, s.id, nil)
+				s.deliverWindow += StreamWindowIncrement
+			}
 			if len(data) == 0 {
+				s.mu.Unlock()
 				continue
 			}
 			n := copy(p, data)
 			if n < len(data) {
 				s.pending = append(s.pending, data[n:]...)
 			}
+			s.mu.Unlock()
 			return n, nil
 		case RelayEnd:
 			s.closed = true
+			s.mu.Unlock()
 			return 0, endReasonError(data)
-		case RelaySendme, RelayConnected:
+		case RelaySendme:
+			s.packageWindow += StreamWindowIncrement
+			s.mu.Unlock()
 			continue
+		case RelayConnected:
+			s.mu.Unlock()
+			continue
+		default:
+			s.mu.Unlock()
 		}
 	}
 }
 
 func (s *Stream) Write(p []byte) (int, error) {
+	s.mu.Lock()
 	if s.closed {
+		s.mu.Unlock()
 		return 0, io.ErrClosedPipe
 	}
+	s.mu.Unlock()
+
 	exit := len(s.circuit.hops) - 1
 	total := 0
 	for len(p) > 0 {
+		s.mu.Lock()
+		for s.packageWindow <= 0 && !s.closed {
+			s.mu.Unlock()
+			hop, cmd, sid, data, err := s.circuit.recvRelayCell()
+			if err != nil {
+				return total, err
+			}
+			if hop != exit || sid != s.id {
+				continue
+			}
+			s.mu.Lock()
+			switch cmd {
+			case RelaySendme:
+				s.packageWindow += StreamWindowIncrement
+			case RelayData:
+				s.deliverWindow--
+				if s.deliverWindow <= StreamWindowThreshold {
+					_ = s.circuit.sendRelayCell(exit, CmdRelay, RelaySendme, s.id, nil)
+					s.deliverWindow += StreamWindowIncrement
+				}
+				s.pending = append(s.pending, data...)
+			case RelayEnd:
+				s.closed = true
+				s.mu.Unlock()
+				return total, endReasonError(data)
+			}
+		}
+
+		if s.closed {
+			s.mu.Unlock()
+			return total, io.ErrClosedPipe
+		}
+
 		n := len(p)
 		if n > MaxRelayData {
 			n = MaxRelayData
 		}
-		if err := s.circuit.sendRelayCell(exit, CmdRelay, RelayData, s.id, p[:n]); err != nil {
+		dataToSend := p[:n]
+		s.packageWindow--
+		s.mu.Unlock()
+
+		if err := s.circuit.sendRelayCell(exit, CmdRelay, RelayData, s.id, dataToSend); err != nil {
 			return total, err
 		}
 		total += n
@@ -115,6 +192,8 @@ func (s *Stream) Write(p []byte) (int, error) {
 }
 
 func (s *Stream) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s == nil || s.closed {
 		return nil
 	}

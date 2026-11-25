@@ -47,6 +47,17 @@ const (
 	RelayBeginDir  = 13
 	RelayExtend2   = 14
 	RelayExtended2 = 15
+
+	// Onion / Rendezvous relay commands (tor-spec.txt §3)
+	RelayEstablishIntro        = 32
+	RelayEstablishRendezvous   = 33
+	RelayIntroduce1            = 34
+	RelayIntroduce2            = 35
+	RelayRendezvous1           = 36
+	RelayRendezvous2           = 37
+	RelayIntroEstablished      = 38
+	RelayRendezvousEstablished = 39
+	RelayIntroduceAck          = 40
 )
 
 type Cell struct {
