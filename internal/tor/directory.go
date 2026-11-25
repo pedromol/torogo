@@ -251,10 +251,14 @@ type Path struct {
 }
 
 func SelectPath(ctx context.Context, cons *Consensus) (*Path, error) {
-	return SelectPathForPort(ctx, cons, 443)
+	return SelectPathWithGuards(ctx, cons, 443, nil)
 }
 
 func SelectPathForPort(ctx context.Context, cons *Consensus, targetPort int) (*Path, error) {
+	return SelectPathWithGuards(ctx, cons, targetPort, nil)
+}
+
+func SelectPathWithGuards(ctx context.Context, cons *Consensus, targetPort int, gm *GuardManager) (*Path, error) {
 	var guards, middles, exits []*RouterStatus
 	for _, rs := range cons.Routers {
 		if rs.HasFlag("NoEdConsensus") || !rs.HasFlag("Running") || !rs.HasFlag("Valid") {
@@ -276,14 +280,26 @@ func SelectPathForPort(ctx context.Context, cons *Consensus, targetPort int) (*P
 
 	var path Path
 	var err error
-	for _, rs := range guards {
-		md, mdErr := FetchMicrodesc(ctx, cons, rs)
-		if mdErr != nil {
-			err = mdErr
-			continue
+
+	if gm != nil {
+		grs, gmd, gerr := gm.SelectGuard(ctx, cons)
+		if gerr == nil && grs != nil && gmd != nil {
+			path.Routers[0], path.Microdescs[0] = grs, gmd
+		} else {
+			err = gerr
 		}
-		path.Routers[0], path.Microdescs[0] = rs, md
-		break
+	}
+
+	if path.Routers[0] == nil {
+		for _, rs := range guards {
+			md, mdErr := FetchMicrodesc(ctx, cons, rs)
+			if mdErr != nil {
+				err = mdErr
+				continue
+			}
+			path.Routers[0], path.Microdescs[0] = rs, md
+			break
+		}
 	}
 	if path.Routers[0] == nil {
 		return nil, fmt.Errorf("tor: no usable guard: %w", err)
